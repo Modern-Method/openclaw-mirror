@@ -42,6 +42,7 @@ import { buildReplyPayloads } from "./agent-runner-payloads.js";
 import { appendUsageLine, formatResponseUsageLine } from "./agent-runner-utils.js";
 import { createAudioAsVoiceBuffer, createBlockReplyPipeline } from "./block-reply-pipeline.js";
 import { resolveEffectiveBlockStreamingConfig } from "./block-streaming.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import { createFollowupRunner } from "./followup-runner.js";
 import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-routing.js";
 import { readPostCompactionContext } from "./post-compaction-context.js";
@@ -49,7 +50,6 @@ import { resolveActiveRunQueueAction } from "./queue-policy.js";
 import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
-import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
@@ -699,12 +699,15 @@ export async function runReplyAgent(params: {
           });
       }
 
-      if (typeof count === "number" && run.config?.agents?.defaults?.compaction?.v2?.enabled) {
+      if (
+        typeof count === "number" &&
+        followupRun.run.config?.agents?.defaults?.compaction?.v2?.enabled
+      ) {
         await appendCompactionCheckpoint({
-          workspaceDir: run.workspaceDir,
-          cfg: run.config,
-          idempotencyKey: `${run.sessionId}:${count}:compaction`,
-          sessionId: run.sessionId,
+          workspaceDir: followupRun.run.workspaceDir,
+          cfg: followupRun.run.config,
+          idempotencyKey: `${followupRun.run.sessionId}:${count}:compaction`,
+          sessionId: followupRun.run.sessionId,
           kind: "compaction",
           payload: "Auto-compaction completed",
         });

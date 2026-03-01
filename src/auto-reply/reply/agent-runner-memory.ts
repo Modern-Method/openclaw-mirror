@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import {
+  formatPinnedFactsBlock,
+  loadPinnedFacts,
+} from "../../agents/compaction-v2/pinned-facts.js";
 import { estimateMessagesTokens } from "../../agents/compaction.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { isCliProvider } from "../../agents/model-selection.js";
@@ -30,6 +34,7 @@ import {
   buildEmbeddedRunContexts,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import {
   resolveMemoryFlushContextWindowTokens,
   resolveMemoryFlushPromptForRun,
@@ -38,8 +43,6 @@ import {
 } from "./memory-flush.js";
 import type { FollowupRun } from "./queue.js";
 import { incrementCompactionCount } from "./session-updates.js";
-import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
-import { formatPinnedFactsBlock, loadPinnedFacts } from "../../agents/compaction-v2/pinned-facts.js";
 
 export function estimatePromptTokensForMemoryFlush(prompt?: string): number | undefined {
   const trimmed = prompt?.trim();
@@ -383,6 +386,25 @@ export async function runMemoryFlushIfNeeded(params: {
   ]
     .filter(Boolean)
     .join("\n\n");
+  let flushPrompt = resolveMemoryFlushPromptForRun({
+    prompt: memoryFlushSettings.prompt,
+    cfg: params.cfg,
+    nowMs: Date.now(),
+  });
+  if (params.cfg?.agents?.defaults?.compaction?.v2?.enabled) {
+    try {
+      const pinned = await loadPinnedFacts({
+        workspaceDir: params.followupRun.run.workspaceDir,
+        pinnedFactsPath: params.cfg?.agents?.defaults?.compaction?.v2?.pinnedFactsPath,
+      });
+      const pinnedBlock = formatPinnedFactsBlock(pinned);
+      if (pinnedBlock) {
+        flushPrompt = `${flushPrompt}\n\n${pinnedBlock}`;
+      }
+    } catch {
+      // best-effort
+    }
+  }
   try {
     await runWithModelFallback({
       ...resolveModelFallbackOptions(params.followupRun.run),
@@ -447,6 +469,25 @@ export async function runMemoryFlushIfNeeded(params: {
         }
       } catch (err) {
         logVerbose(`failed to persist memory flush metadata: ${String(err)}`);
+      }
+    }
+    if (params.cfg?.agents?.defaults?.compaction?.v2?.enabled) {
+      try {
+        await appendCompactionCheckpoint({
+          workspaceDir: params.followupRun.run.workspaceDir,
+          cfg: params.cfg,
+          idempotencyKey: `${params.followupRun.run.sessionId}:${memoryFlushCompactionCount}:memory-flush`,
+          sessionId: params.followupRun.run.sessionId,
+          kind: "memory-flush",
+          payload: [
+            "Memory flush completed",
+            `sessionKey: ${params.sessionKey ?? "(none)"}`,
+            `compactionCount: ${memoryFlushCompactionCount}`,
+            `tokenCountForFlush: ${tokenCountForFlush ?? "unknown"}`,
+          ].join("\n"),
+        });
+      } catch (err) {
+        logVerbose(`failed to append memory flush checkpoint: ${String(err)}`);
       }
     }
   } catch (err) {
