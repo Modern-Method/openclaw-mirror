@@ -84,3 +84,40 @@ describe("config compaction settings", () => {
     );
   });
 });
+
+
+  it("preserves v2 compaction config values", async () => {
+    await withTempHomeConfig(
+      {
+        agents: {
+          defaults: {
+            compaction: {
+              v2: {
+                enabled: true,
+                templateVersion: "v1",
+                maxSummaryNodes: 6,
+                maxNodeTokens: 900,
+                maxChainTokens: 4000,
+                mergePolicy: "mergeOldest",
+                pinnedFactsPath: "memory/pinned.md",
+                keepRecentRatio: 0.08,
+                reserveRatio: 0.1,
+                drainTargetRatio: 0.6,
+                checkpointLedgerEnabled: true,
+                checkpointLedgerPath: "memory/checkpoints/YYYY-MM-DD.md",
+                ethosIngestHintMode: "hook-friendly",
+              },
+            },
+          },
+        },
+      },
+      async () => {
+        const cfg = loadConfig();
+        expect(cfg.agents?.defaults?.compaction?.v2?.enabled).toBe(true);
+        expect(cfg.agents?.defaults?.compaction?.v2?.mergePolicy).toBe("mergeOldest");
+        expect(cfg.agents?.defaults?.compaction?.v2?.checkpointLedgerPath).toBe(
+          "memory/checkpoints/YYYY-MM-DD.md",
+        );
+      },
+    );
+  });

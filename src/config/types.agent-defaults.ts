@@ -271,6 +271,22 @@ export type AgentDefaultsConfig = {
 export type AgentCompactionMode = "default" | "safeguard";
 export type AgentCompactionIdentifierPolicy = "strict" | "off" | "custom";
 
+export type AgentCompactionV2Config = {
+  enabled?: boolean;
+  templateVersion?: string;
+  maxSummaryNodes?: number;
+  maxNodeTokens?: number;
+  maxChainTokens?: number;
+  mergePolicy?: "mergeOldest" | "mergePairs";
+  pinnedFactsPath?: string;
+  keepRecentRatio?: number;
+  reserveRatio?: number;
+  drainTargetRatio?: number;
+  checkpointLedgerEnabled?: boolean;
+  checkpointLedgerPath?: string;
+  ethosIngestHintMode?: "none" | "hook-friendly";
+};
+
 export type AgentCompactionConfig = {
   /** Compaction summarization mode. */
   mode?: AgentCompactionMode;
@@ -288,6 +304,8 @@ export type AgentCompactionConfig = {
   identifierInstructions?: string;
   /** Pre-compaction memory flush (agentic turn). Default: enabled. */
   memoryFlush?: AgentCompactionMemoryFlushConfig;
+  /** Anchored summary chain + checkpoint durability controls (v2; default disabled). */
+  v2?: AgentCompactionV2Config;
 };
 
 export type AgentCompactionMemoryFlushConfig = {

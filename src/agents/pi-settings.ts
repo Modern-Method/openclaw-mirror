@@ -47,10 +47,15 @@ function toNonNegativeInt(value: unknown): number | undefined {
 }
 
 function toPositiveInt(value: unknown): number | undefined {
+
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
   }
   return Math.floor(value);
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 export function applyPiCompactionSettingsFromConfig(params: {
@@ -67,12 +72,22 @@ export function applyPiCompactionSettingsFromConfig(params: {
   const configuredReserveTokens = toNonNegativeInt(compactionCfg?.reserveTokens);
   const configuredKeepRecentTokens = toPositiveInt(compactionCfg?.keepRecentTokens);
   const reserveTokensFloor = resolveCompactionReserveTokensFloor(params.cfg);
+  const contextWindow = params.cfg?.agents?.defaults?.contextTokens;
+  const v2 = compactionCfg?.v2;
+  const dynamicReserve =
+    v2?.enabled && typeof contextWindow === "number"
+      ? Math.ceil(contextWindow * (v2.reserveRatio ?? 0.1))
+      : undefined;
+  const dynamicKeepRecent =
+    v2?.enabled && typeof contextWindow === "number"
+      ? clampInt(Math.ceil(contextWindow * (v2.keepRecentRatio ?? 0.08)), 8_000, 32_000)
+      : undefined;
 
   const targetReserveTokens = Math.max(
-    configuredReserveTokens ?? currentReserveTokens,
+    configuredReserveTokens ?? dynamicReserve ?? currentReserveTokens,
     reserveTokensFloor,
   );
-  const targetKeepRecentTokens = configuredKeepRecentTokens ?? currentKeepRecentTokens;
+  const targetKeepRecentTokens = configuredKeepRecentTokens ?? dynamicKeepRecent ?? currentKeepRecentTokens;
 
   const overrides: { reserveTokens?: number; keepRecentTokens?: number } = {};
   if (targetReserveTokens !== currentReserveTokens) {

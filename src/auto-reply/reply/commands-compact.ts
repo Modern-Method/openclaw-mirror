@@ -16,6 +16,8 @@ import { formatContextUsageShort, formatTokenCount } from "../status.js";
 import type { CommandHandler } from "./commands-types.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { incrementCompactionCount } from "./session-updates.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
+import { formatPinnedFactsBlock, loadPinnedFacts } from "../../agents/compaction-v2/pinned-facts.js";
 
 function extractCompactInstructions(params: {
   rawBody?: string;
@@ -75,6 +77,12 @@ export const handleCompactCommand: CommandHandler = async (params) => {
     agentId: params.agentId,
     isGroup: params.isGroup,
   });
+  const pinnedFacts = params.cfg?.agents?.defaults?.compaction?.v2?.enabled
+    ? await loadPinnedFacts({ workspaceDir: params.workspaceDir, pinnedFactsPath: params.cfg?.agents?.defaults?.compaction?.v2?.pinnedFactsPath })
+    : null;
+  const pinnedBlock = formatPinnedFactsBlock(pinnedFacts);
+  const effectiveInstructions = [customInstructions, pinnedBlock].filter(Boolean).join("\n\n") || undefined;
+
   const result = await compactEmbeddedPiSession({
     sessionId,
     sessionKey: params.sessionKey,
@@ -103,7 +111,7 @@ export const handleCompactCommand: CommandHandler = async (params) => {
       allowed: false,
       defaultLevel: "off",
     },
-    customInstructions,
+    customInstructions: effectiveInstructions,
     trigger: "manual",
     senderIsOwner: params.command.senderIsOwner,
     ownerNumbers: params.command.ownerList.length > 0 ? params.command.ownerList : undefined,
@@ -119,7 +127,7 @@ export const handleCompactCommand: CommandHandler = async (params) => {
       : "Compaction skipped"
     : "Compaction failed";
   if (result.ok && result.compacted) {
-    await incrementCompactionCount({
+    const nextCount = await incrementCompactionCount({
       sessionEntry: params.sessionEntry,
       sessionStore: params.sessionStore,
       sessionKey: params.sessionKey,
@@ -127,6 +135,16 @@ export const handleCompactCommand: CommandHandler = async (params) => {
       // Update token counts after compaction
       tokensAfter: result.result?.tokensAfter,
     });
+    if (params.cfg?.agents?.defaults?.compaction?.v2?.enabled && nextCount != null) {
+      await appendCompactionCheckpoint({
+        workspaceDir: params.workspaceDir,
+        cfg: params.cfg,
+        idempotencyKey: `${sessionId}:${nextCount}:compaction`,
+        sessionId,
+        kind: "compaction",
+        payload: result.result?.summary ?? "",
+      });
+    }
   }
   // Use the post-compaction token count for context summary if available
   const tokensAfterCompaction = result.result?.tokensAfter;

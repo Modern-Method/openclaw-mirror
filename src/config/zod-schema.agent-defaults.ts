@@ -97,6 +97,24 @@ export const AgentDefaultsSchema = z
           })
           .strict()
           .optional(),
+        v2: z
+          .object({
+            enabled: z.boolean().optional(),
+            templateVersion: z.string().optional(),
+            maxSummaryNodes: z.number().int().positive().optional(),
+            maxNodeTokens: z.number().int().positive().optional(),
+            maxChainTokens: z.number().int().positive().optional(),
+            mergePolicy: z.union([z.literal("mergeOldest"), z.literal("mergePairs")]).optional(),
+            pinnedFactsPath: z.string().optional(),
+            keepRecentRatio: z.number().positive().max(1).optional(),
+            reserveRatio: z.number().positive().max(1).optional(),
+            drainTargetRatio: z.number().positive().max(1).optional(),
+            checkpointLedgerEnabled: z.boolean().optional(),
+            checkpointLedgerPath: z.string().optional(),
+            ethosIngestHintMode: z.union([z.literal("none"), z.literal("hook-friendly")]).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

@@ -29,6 +29,7 @@ import {
 import { resolveReplyToMode } from "./reply-threading.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
@@ -304,6 +305,16 @@ export function createFollowupRunner(params: {
           lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
           contextTokensUsed,
         });
+        if (typeof count === "number" && queued.run.config?.agents?.defaults?.compaction?.v2?.enabled) {
+          await appendCompactionCheckpoint({
+            workspaceDir: queued.run.workspaceDir,
+            cfg: queued.run.config,
+            idempotencyKey: `${queued.run.sessionId}:${count}:compaction`,
+            sessionId: queued.run.sessionId,
+            kind: "compaction",
+            payload: "Auto-compaction completed",
+          });
+        }
         if (queued.run.verboseLevel && queued.run.verboseLevel !== "off") {
           const suffix = typeof count === "number" ? ` (count ${count})` : "";
           finalPayloads.unshift({

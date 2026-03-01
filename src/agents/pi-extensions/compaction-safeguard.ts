@@ -17,6 +17,13 @@ import {
   summarizeInStages,
 } from "../compaction.js";
 import { collectTextContentBlocks } from "../content-blocks.js";
+import {
+  appendNodeWithLimits,
+  parseCompactionV2State,
+  renderCompactionV2Summary,
+  resolveDeltaMessages,
+} from "../compaction-v2/chain.js";
+import { formatPinnedFactsBlock, loadPinnedFacts } from "../compaction-v2/pinned-facts.js";
 import { getCompactionSafeguardRuntime } from "./compaction-safeguard-runtime.js";
 
 const log = createSubsystemLogger("compaction-safeguard");
@@ -239,11 +246,32 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
       return { cancel: true };
     }
 
+    let pinnedFactsText = "";
+    const v2 = runtime?.compactionV2;
+    const pinnedFacts = await loadPinnedFacts({
+      workspaceDir: runtime?.workspaceDir ?? process.cwd(),
+      pinnedFactsPath: runtime?.pinnedFactsPath,
+    });
+    const pinnedBlock = formatPinnedFactsBlock(pinnedFacts);
+    if (pinnedBlock) {
+      pinnedFactsText = `
+
+${pinnedBlock}`;
+    }
+
     try {
       const modelContextWindow = resolveContextWindowTokens(model);
       const contextWindowTokens = runtime?.contextWindowTokens ?? modelContextWindow;
       const turnPrefixMessages = preparation.turnPrefixMessages ?? [];
       let messagesToSummarize = preparation.messagesToSummarize;
+      const priorV2State = v2?.enabled ? parseCompactionV2State(preparation.previousSummary) : null;
+      if (v2?.enabled && priorV2State?.chain?.length) {
+        const priorTo = priorV2State.chain[priorV2State.chain.length - 1]?.toEntryId;
+        const delta = resolveDeltaMessages(messagesToSummarize, priorTo);
+        if (delta?.delta?.length) {
+          messagesToSummarize = delta.delta as typeof messagesToSummarize;
+        }
+      }
 
       const maxHistoryShare = runtime?.maxHistoryShare ?? 0.5;
 
@@ -298,7 +326,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
                   reserveTokens: Math.max(1, Math.floor(preparation.settings.reserveTokens)),
                   maxChunkTokens: droppedMaxChunkTokens,
                   contextWindow: contextWindowTokens,
-                  customInstructions,
+                  customInstructions: `${customInstructions ?? ""}${pinnedFactsText}`.trim(),
                   summarizationInstructions,
                   previousSummary: preparation.previousSummary,
                 });
@@ -337,7 +365,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
         reserveTokens,
         maxChunkTokens,
         contextWindow: contextWindowTokens,
-        customInstructions,
+        customInstructions: `${customInstructions ?? ""}${pinnedFactsText}`.trim(),
         summarizationInstructions,
         previousSummary: effectivePreviousSummary,
       });
@@ -357,6 +385,36 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           previousSummary: undefined,
         });
         summary = `${historySummary}\n\n---\n\n**Turn Context (split turn):**\n\n${prefixSummary}`;
+      }
+
+      if (v2?.enabled) {
+        try {
+          const prior = priorV2State;
+          const chain = appendNodeWithLimits({
+            prior,
+            node: {
+              fromEntryId: `${Date.now()}:0`,
+              toEntryId: `${Date.now()}:${Math.max(0, messagesToSummarize.length - 1)}`,
+              createdAt: new Date().toISOString(),
+              phase: "safeguard",
+              summary,
+              artifactIndex: { files: modifiedFiles, commands: [], refs: [] },
+              ethosHints: [],
+            },
+            limits: {
+              maxSummaryNodes: v2.maxSummaryNodes ?? 6,
+              maxNodeTokens: v2.maxNodeTokens ?? 900,
+              maxChainTokens: v2.maxChainTokens ?? 4000,
+              mergePolicy: v2.mergePolicy ?? "mergeOldest",
+            },
+            pinned: pinnedFacts ? { path: pinnedFacts.path, hash: pinnedFacts.hash } : undefined,
+            firstKeptEntryId: preparation.firstKeptEntryId,
+            tokensBefore: preparation.tokensBefore,
+          });
+          summary = renderCompactionV2Summary(chain);
+        } catch {
+          // graceful fallback to v1 plain summary
+        }
       }
 
       summary += toolFailureSection;

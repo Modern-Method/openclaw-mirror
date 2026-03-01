@@ -84,6 +84,9 @@ export function buildEmbeddedExtensionFactories(params: {
       identifierPolicy: compactionCfg?.identifierPolicy,
       identifierInstructions: compactionCfg?.identifierInstructions,
       model: params.model,
+      workspaceDir: params.cfg?.agents?.defaults?.workspace,
+      compactionV2: compactionCfg?.v2,
+      pinnedFactsPath: compactionCfg?.v2?.pinnedFactsPath,
     });
     factories.push(compactionSafeguardExtension);
   }

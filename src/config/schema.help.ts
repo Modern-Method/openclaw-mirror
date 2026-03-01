@@ -936,6 +936,22 @@ export const FIELD_HELP: Record<string, string> = {
     "User-prompt template used for the pre-compaction memory flush turn when generating memory candidates. Use this only when you need custom extraction instructions beyond the default memory flush behavior.",
   "agents.defaults.compaction.memoryFlush.systemPrompt":
     "System-prompt override for the pre-compaction memory flush turn to control extraction style and safety constraints. Use carefully so custom instructions do not reduce memory quality or leak sensitive context.",
+  "agents.defaults.compaction.v2":
+    "Compaction v2 controls (anchored summary chain + checkpoint persistence). Disabled by default for backward compatibility.",
+  "agents.defaults.compaction.v2.enabled":
+    "Enable anchored-chain compaction v2 behavior in safeguard mode. When false, existing compaction behavior is preserved.",
+  "agents.defaults.compaction.v2.templateVersion": "Compaction v2 template version label (default: v1).",
+  "agents.defaults.compaction.v2.maxSummaryNodes": "Maximum anchored summary nodes retained before merge.",
+  "agents.defaults.compaction.v2.maxNodeTokens": "Per-node token budget for anchored summary nodes.",
+  "agents.defaults.compaction.v2.maxChainTokens": "Total token budget across all anchored summary nodes.",
+  "agents.defaults.compaction.v2.mergePolicy": "Merge strategy when chain caps are exceeded.",
+  "agents.defaults.compaction.v2.pinnedFactsPath": "Workspace-relative pinned facts file injected verbatim.",
+  "agents.defaults.compaction.v2.keepRecentRatio": "Dynamic keep-recent ratio of context window (default 0.08).",
+  "agents.defaults.compaction.v2.reserveRatio": "Dynamic reserve ratio of context window (default 0.10).",
+  "agents.defaults.compaction.v2.drainTargetRatio": "Post-compaction drain target ratio (default 0.60).",
+  "agents.defaults.compaction.v2.checkpointLedgerEnabled": "Enable local append-only checkpoint ledger writes.",
+  "agents.defaults.compaction.v2.checkpointLedgerPath": "Checkpoint ledger path (supports YYYY-MM-DD placeholder).",
+  "agents.defaults.compaction.v2.ethosIngestHintMode": "Emit hook-friendly Ethos ingest metadata hints in checkpoint payloads.",
   "agents.defaults.embeddedPi":
     "Embedded Pi runner hardening controls for how workspace-local Pi settings are trusted and applied in OpenClaw sessions.",
   "agents.defaults.embeddedPi.projectSettingsPolicy":

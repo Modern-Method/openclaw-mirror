@@ -38,6 +38,8 @@ import {
 } from "./memory-flush.js";
 import type { FollowupRun } from "./queue.js";
 import { incrementCompactionCount } from "./session-updates.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
+import { formatPinnedFactsBlock, loadPinnedFacts } from "../../agents/compaction-v2/pinned-facts.js";
 
 export function estimatePromptTokensForMemoryFlush(prompt?: string): number | undefined {
   const trimmed = prompt?.trim();
@@ -402,10 +404,7 @@ export async function runMemoryFlushIfNeeded(params: {
           ...embeddedContext,
           ...senderContext,
           ...runBaseParams,
-          prompt: resolveMemoryFlushPromptForRun({
-            prompt: memoryFlushSettings.prompt,
-            cfg: params.cfg,
-          }),
+          prompt: flushPrompt,
           extraSystemPrompt: flushSystemPrompt,
           onAgentEvent: (evt) => {
             if (evt.stream === "compaction") {

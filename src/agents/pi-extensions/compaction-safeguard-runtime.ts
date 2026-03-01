@@ -1,5 +1,8 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
-import type { AgentCompactionIdentifierPolicy } from "../../config/types.agent-defaults.js";
+import type {
+  AgentCompactionIdentifierPolicy,
+  AgentCompactionV2Config,
+} from "../../config/types.agent-defaults.js";
 import { createSessionManagerRuntimeRegistry } from "./session-manager-runtime-registry.js";
 
 export type CompactionSafeguardRuntimeValue = {
@@ -13,6 +16,9 @@ export type CompactionSafeguardRuntimeValue = {
    * (extensionRunner.initialize() is never called in that path).
    */
   model?: Model<Api>;
+  workspaceDir?: string;
+  compactionV2?: AgentCompactionV2Config;
+  pinnedFactsPath?: string;
 };
 
 const registry = createSessionManagerRuntimeRegistry<CompactionSafeguardRuntimeValue>();

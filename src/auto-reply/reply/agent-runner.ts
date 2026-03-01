@@ -49,6 +49,7 @@ import { resolveActiveRunQueueAction } from "./queue-policy.js";
 import { enqueueFollowupRun, type FollowupRun, type QueueSettings } from "./queue.js";
 import { createReplyToModeFilterForChannel, resolveReplyToMode } from "./reply-threading.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
@@ -698,6 +699,16 @@ export async function runReplyAgent(params: {
           });
       }
 
+      if (typeof count === "number" && run.config?.agents?.defaults?.compaction?.v2?.enabled) {
+        await appendCompactionCheckpoint({
+          workspaceDir: run.workspaceDir,
+          cfg: run.config,
+          idempotencyKey: `${run.sessionId}:${count}:compaction`,
+          sessionId: run.sessionId,
+          kind: "compaction",
+          payload: "Auto-compaction completed",
+        });
+      }
       if (verboseEnabled) {
         const suffix = typeof count === "number" ? ` (count ${count})` : "";
         verboseNotices.push({ text: `🧹 Auto-compaction complete${suffix}.` });
