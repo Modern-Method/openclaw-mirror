@@ -2,6 +2,12 @@ import { Type } from "@sinclair/typebox";
 import { normalizeGroupActivation } from "../../auto-reply/group-activation.js";
 import { getFollowupQueueDepth, resolveQueueSettings } from "../../auto-reply/reply/queue.js";
 import { buildStatusMessage } from "../../auto-reply/status.js";
+import {
+  normalizeElevatedLevel,
+  normalizeReasoningLevel,
+  normalizeThinkLevel,
+  normalizeVerboseLevel,
+} from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
 import {
@@ -32,6 +38,8 @@ import {
   modelKey,
   resolveDefaultModelForAgent,
   resolveModelRefFromString,
+  resolveReasoningDefault,
+  resolveThinkingDefault,
 } from "../model-selection.js";
 import type { AnyAgentTool } from "./common.js";
 import { readStringParam } from "./common.js";
@@ -296,6 +304,42 @@ export function createSessionStatusTool(opts?: {
 
       const agentDir = resolveAgentDir(cfg, agentId);
       const providerForCard = resolved.entry.providerOverride?.trim() || configured.provider;
+      const modelForCard = resolved.entry.modelOverride?.trim() || configured.model;
+      const agentDefaults = cfg.agents?.defaults ?? {};
+
+      let defaultThinkLevel = normalizeThinkLevel(agentDefaults.thinkingDefault) ?? "off";
+      let defaultReasoningLevel = normalizeReasoningLevel("off") ?? "off";
+      try {
+        const catalog = await loadModelCatalog({ config: cfg });
+        defaultThinkLevel =
+          normalizeThinkLevel(
+            resolveThinkingDefault({
+              cfg,
+              provider: providerForCard,
+              model: modelForCard,
+              catalog,
+            }),
+          ) ?? defaultThinkLevel;
+        defaultReasoningLevel =
+          normalizeReasoningLevel(
+            resolveReasoningDefault({ provider: providerForCard, model: modelForCard, catalog }),
+          ) ?? defaultReasoningLevel;
+      } catch {
+        // ignore catalog failures
+      }
+      const resolvedThinkLevel =
+        normalizeThinkLevel(resolved.entry.thinkingLevel) ?? defaultThinkLevel;
+      const resolvedVerboseLevel =
+        normalizeVerboseLevel(resolved.entry.verboseLevel) ??
+        normalizeVerboseLevel(agentDefaults.verboseDefault) ??
+        "off";
+      const resolvedReasoningLevel =
+        normalizeReasoningLevel(resolved.entry.reasoningLevel) ?? defaultReasoningLevel;
+      const resolvedElevatedLevel =
+        normalizeElevatedLevel(resolved.entry.elevatedLevel) ??
+        normalizeElevatedLevel(agentDefaults.elevatedDefault) ??
+        "on";
+
       const usageProvider = resolveUsageProviderId(providerForCard);
       let usageLine: string | undefined;
       if (usageProvider) {
@@ -348,7 +392,6 @@ export function createSessionStatusTool(opts?: {
         ? `🕒 Time: ${userTime} (${userTimezone})`
         : `🕒 Time zone: ${userTimezone}`;
 
-      const agentDefaults = cfg.agents?.defaults ?? {};
       const defaultLabel = `${configured.provider}/${configured.model}`;
       const agentModel =
         typeof agentDefaults.model === "object" && agentDefaults.model
@@ -364,6 +407,10 @@ export function createSessionStatusTool(opts?: {
         sessionEntry: resolved.entry,
         sessionKey: resolved.key,
         sessionStorePath: storePath,
+        resolvedThink: resolvedThinkLevel,
+        resolvedVerbose: resolvedVerboseLevel,
+        resolvedReasoning: resolvedReasoningLevel,
+        resolvedElevated: resolvedElevatedLevel,
         groupActivation,
         modelAuth: resolveModelAuthLabel({
           provider: providerForCard,
