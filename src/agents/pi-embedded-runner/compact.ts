@@ -250,6 +250,9 @@ export async function compactEmbeddedPiSessionDirect(
   const startedAt = Date.now();
   const diagId = params.diagId?.trim() || createCompactionDiagId();
   const trigger = params.trigger ?? "manual";
+  // Manual compactions (via /compact) can take longer on very large contexts.
+  // Keep a tight safety ceiling for overflow/automatic compaction.
+  const safetyTimeoutMs = trigger === "manual" ? 900_000 : EMBEDDED_COMPACTION_TIMEOUT_MS;
   const attempt = params.attempt ?? 1;
   const maxAttempts = params.maxAttempts ?? 1;
   const runId = params.runId ?? params.sessionId;
@@ -516,7 +519,7 @@ export async function compactEmbeddedPiSessionDirect(
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
       maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
-        timeoutMs: EMBEDDED_COMPACTION_TIMEOUT_MS,
+        timeoutMs: safetyTimeoutMs,
       }),
     });
     try {
@@ -651,7 +654,7 @@ export async function compactEmbeddedPiSessionDirect(
           log.debug(
             `[compaction-diag] start runId=${runId} sessionKey=${params.sessionKey ?? params.sessionId} ` +
               `diagId=${diagId} trigger=${trigger} provider=${provider}/${modelId} ` +
-              `attempt=${attempt} maxAttempts=${maxAttempts} ` +
+              `attempt=${attempt} maxAttempts=${maxAttempts} timeoutMs=${safetyTimeoutMs} ` +
               `pre.messages=${preMetrics.messages} pre.historyTextChars=${preMetrics.historyTextChars} ` +
               `pre.toolResultChars=${preMetrics.toolResultChars} pre.estTokens=${preMetrics.estTokens ?? "unknown"}`,
           );
@@ -661,8 +664,9 @@ export async function compactEmbeddedPiSessionDirect(
         }
 
         const compactStartedAt = Date.now();
-        const result = await compactWithSafetyTimeout(() =>
-          session.compact(params.customInstructions),
+        const result = await compactWithSafetyTimeout(
+          () => session.compact(params.customInstructions),
+          safetyTimeoutMs,
         );
         // Estimate tokens after compaction by summing token estimates for remaining messages
         let tokensAfter: number | undefined;
