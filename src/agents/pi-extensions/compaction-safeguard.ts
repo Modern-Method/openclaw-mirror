@@ -5,6 +5,13 @@ import type { ExtensionAPI, FileOperations } from "@mariozechner/pi-coding-agent
 import { extractSections } from "../../auto-reply/reply/post-compaction-context.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
+  appendNodeWithLimits,
+  parseCompactionV2State,
+  renderCompactionV2Summary,
+  resolveDeltaMessages,
+} from "../compaction-v2/chain.js";
+import { formatPinnedFactsBlock, loadPinnedFacts } from "../compaction-v2/pinned-facts.js";
+import {
   BASE_CHUNK_RATIO,
   MIN_CHUNK_RATIO,
   SAFETY_MARGIN,
@@ -17,13 +24,6 @@ import {
   summarizeInStages,
 } from "../compaction.js";
 import { collectTextContentBlocks } from "../content-blocks.js";
-import {
-  appendNodeWithLimits,
-  parseCompactionV2State,
-  renderCompactionV2Summary,
-  resolveDeltaMessages,
-} from "../compaction-v2/chain.js";
-import { formatPinnedFactsBlock, loadPinnedFacts } from "../compaction-v2/pinned-facts.js";
 import { getCompactionSafeguardRuntime } from "./compaction-safeguard-runtime.js";
 
 const log = createSubsystemLogger("compaction-safeguard");
@@ -269,7 +269,7 @@ ${pinnedBlock}`;
         const priorTo = priorV2State.chain[priorV2State.chain.length - 1]?.toEntryId;
         const delta = resolveDeltaMessages(messagesToSummarize, priorTo);
         if (delta?.delta?.length) {
-          messagesToSummarize = delta.delta as typeof messagesToSummarize;
+          messagesToSummarize = delta.delta;
         }
       }
 
@@ -390,11 +390,17 @@ ${pinnedBlock}`;
       if (v2?.enabled) {
         try {
           const prior = priorV2State;
+          const entryRange = resolveDeltaMessages(messagesToSummarize) ?? {
+            delta: messagesToSummarize,
+            fromEntryId: `${Date.now()}:0`,
+            toEntryId: `${Date.now()}:${Math.max(0, messagesToSummarize.length - 1)}`,
+          };
+
           const chain = appendNodeWithLimits({
             prior,
             node: {
-              fromEntryId: `${Date.now()}:0`,
-              toEntryId: `${Date.now()}:${Math.max(0, messagesToSummarize.length - 1)}`,
+              fromEntryId: entryRange.fromEntryId,
+              toEntryId: entryRange.toEntryId,
               createdAt: new Date().toISOString(),
               phase: "safeguard",
               summary,

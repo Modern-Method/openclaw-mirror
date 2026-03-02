@@ -89,6 +89,34 @@ describe("applyPiCompactionSettingsFromConfig", () => {
     });
   });
 
+  it("applies dynamic v2 ratios when enabled and contextTokens is present", () => {
+    const settingsManager = {
+      getCompactionReserveTokens: () => 30_000,
+      getCompactionKeepRecentTokens: () => 20_000,
+      applyOverrides: vi.fn(),
+    };
+
+    const result = applyPiCompactionSettingsFromConfig({
+      settingsManager,
+      cfg: {
+        agents: {
+          defaults: {
+            contextTokens: 200_000,
+            compaction: { v2: { enabled: true, reserveRatio: 0.1, keepRecentRatio: 0.08 } },
+          },
+        },
+      },
+    });
+
+    // reserve: 10% of 200k = 20k, but floor applies (20k) and current is 30k -> no override for reserve.
+    // keepRecent: 8% of 200k = 16k (clamped 8k..32k) -> overrides from 20k to 16k.
+    expect(result.compaction.reserveTokens).toBe(30_000);
+    expect(result.compaction.keepRecentTokens).toBe(16_000);
+    expect(settingsManager.applyOverrides).toHaveBeenCalledWith({
+      compaction: { keepRecentTokens: 16_000 },
+    });
+  });
+
   it("preserves current keepRecentTokens when safeguard mode leaves it unset", () => {
     const settingsManager = {
       getCompactionReserveTokens: () => 25_000,

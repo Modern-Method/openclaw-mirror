@@ -47,7 +47,6 @@ function toNonNegativeInt(value: unknown): number | undefined {
 }
 
 function toPositiveInt(value: unknown): number | undefined {
-
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
   }
@@ -83,11 +82,17 @@ export function applyPiCompactionSettingsFromConfig(params: {
       ? clampInt(Math.ceil(contextWindow * (v2.keepRecentRatio ?? 0.08)), 8_000, 32_000)
       : undefined;
 
+  // Safety: never *decrease* reserveTokens automatically.
+  // - configuredReserveTokens can increase reserve, but should not silently reduce it
+  // - dynamicReserve (v2 ratios) is best treated as a floor/boost, not a downshift
   const targetReserveTokens = Math.max(
-    configuredReserveTokens ?? dynamicReserve ?? currentReserveTokens,
+    currentReserveTokens,
+    configuredReserveTokens ?? 0,
+    dynamicReserve ?? 0,
     reserveTokensFloor,
   );
-  const targetKeepRecentTokens = configuredKeepRecentTokens ?? dynamicKeepRecent ?? currentKeepRecentTokens;
+  const targetKeepRecentTokens =
+    configuredKeepRecentTokens ?? dynamicKeepRecent ?? currentKeepRecentTokens;
 
   const overrides: { reserveTokens?: number; keepRecentTokens?: number } = {};
   if (targetReserveTokens !== currentReserveTokens) {

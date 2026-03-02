@@ -83,8 +83,6 @@ describe("config compaction settings", () => {
       },
     );
   });
-});
-
 
   it("preserves v2 compaction config values", async () => {
     await withTempHomeConfig(
@@ -121,3 +119,4 @@ describe("config compaction settings", () => {
       },
     );
   });
+});
