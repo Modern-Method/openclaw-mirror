@@ -123,6 +123,29 @@ function resolveEthosContextConfig(cfg?: OpenClawConfig): EthosContextConfig {
   return hookConfig ?? {};
 }
 
+function resolveOwnerCanonicalIdentityKey(
+  identityLinks: Record<string, string[] | undefined> | undefined,
+): string | undefined {
+  if (!identityLinks) {
+    return undefined;
+  }
+  const keys = Object.keys(identityLinks)
+    .map((k) => k.trim())
+    .filter(Boolean);
+  if (keys.length === 0) {
+    return undefined;
+  }
+  // Prefer common canonical labels if present, otherwise if there is only one, use it.
+  const preferred = ["owner", "michael"].find((k) => identityLinks[k]?.length);
+  if (preferred) {
+    return preferred;
+  }
+  if (keys.length === 1) {
+    return keys[0];
+  }
+  return keys[0];
+}
+
 function resolveSearchUrl(baseUrl: string): string | null {
   try {
     return new URL("/search", baseUrl).toString();
@@ -465,22 +488,33 @@ const ethosContextHook: HookHandler = async (event) => {
     return;
   }
 
-  const senderId = resolveOptionalString(context.senderId);
-  if (!senderId) {
-    log.debug("Ethos context senderId missing; skipping scoped injection");
-    return;
-  }
   const channelId = resolveOptionalString(context.channelId);
   if (!channelId) {
     log.debug("Ethos context channelId missing; skipping scoped injection");
     return;
   }
 
-  const resourceId = resolveCanonicalResourceId({
-    identityLinks: cfg?.session?.identityLinks,
-    channelId,
-    senderId,
-  });
+  const senderId = resolveOptionalString(context.senderId);
+  const senderIsOwner = context.senderIsOwner === true;
+
+  // For direct-owner DMs, OpenClaw may omit SenderId in the session context.
+  // If we can confirm the sender is the configured owner, fall back to a canonical
+  // identity key from session.identityLinks.
+  const resourceId = senderId
+    ? resolveCanonicalResourceId({
+        identityLinks: cfg?.session?.identityLinks,
+        channelId,
+        senderId,
+      })
+    : senderIsOwner
+      ? resolveOwnerCanonicalIdentityKey(cfg?.session?.identityLinks)
+      : undefined;
+
+  if (!resourceId && !senderId) {
+    log.debug("Ethos context senderId missing (and not owner); skipping scoped injection");
+    return;
+  }
+
   const threadId = event.sessionKey;
 
   const nowMs = Date.now();
