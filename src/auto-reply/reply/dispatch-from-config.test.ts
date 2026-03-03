@@ -1776,9 +1776,13 @@ describe("dispatchReplyFromConfig", () => {
       "agent:main:main",
       expect.objectContaining({
         from: ctx.From,
+        senderId: ctx.SenderId,
+        to: ctx.To,
         content: "/help",
         channelId: "telegram",
         messageId: "msg-42",
+        agentId: "main",
+        cfg,
         metadata: expect.objectContaining({
           guildId: "guild-456",
           channelName: "ops-room",

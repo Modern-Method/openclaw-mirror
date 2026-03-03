@@ -8,6 +8,7 @@ import {
   classifySessionKeyShape,
   isValidAgentId,
   parseAgentSessionKey,
+  resolveCanonicalResourceId,
   toAgentStoreSessionKey,
 } from "./session-key.js";
 
@@ -128,5 +129,40 @@ describe("isValidAgentId", () => {
     expect(isValidAgentId("Agent not found: xyz")).toBe(false);
     expect(isValidAgentId("../../../etc/passwd")).toBe(false);
     expect(isValidAgentId("a".repeat(65))).toBe(false);
+  });
+});
+
+describe("resolveCanonicalResourceId", () => {
+  it("returns canonical identity when identityLinks contains channel-prefixed sender id", () => {
+    const resourceId = resolveCanonicalResourceId({
+      identityLinks: {
+        michael: ["telegram:8480568759"],
+      },
+      channelId: "telegram",
+      senderId: "8480568759",
+    });
+    expect(resourceId).toBe("michael");
+  });
+
+  it("matches identityLinks case-insensitively", () => {
+    const resourceId = resolveCanonicalResourceId({
+      identityLinks: {
+        Michael: ["TeLeGrAm:8480568759"],
+      },
+      channelId: "telegram",
+      senderId: "8480568759",
+    });
+    expect(resourceId).toBe("Michael");
+  });
+
+  it("falls back to channel-prefixed sender id when no canonical mapping exists", () => {
+    const resourceId = resolveCanonicalResourceId({
+      identityLinks: {
+        michael: ["telegram:8480568759"],
+      },
+      channelId: "telegram",
+      senderId: "999999",
+    });
+    expect(resourceId).toBe("telegram:999999");
   });
 });

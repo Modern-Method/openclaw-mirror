@@ -3,6 +3,7 @@ import {
   clearInternalHooks,
   createInternalHookEvent,
   getRegisteredEventKeys,
+  isAgentBeforePromptBuildEvent,
   isAgentBootstrapEvent,
   isGatewayStartupEvent,
   isMessageReceivedEvent,
@@ -11,6 +12,7 @@ import {
   triggerInternalHook,
   unregisterInternalHook,
   type AgentBootstrapHookContext,
+  type AgentBeforePromptBuildHookContext,
   type GatewayStartupHookContext,
   type MessageReceivedHookContext,
   type MessageSentHookContext,
@@ -207,6 +209,44 @@ describe("hooks", () => {
     for (const testCase of cases) {
       it(testCase.name, () => {
         expect(isAgentBootstrapEvent(testCase.event)).toBe(testCase.expected);
+      });
+    }
+  });
+
+  describe("isAgentBeforePromptBuildEvent", () => {
+    const cases: Array<{
+      name: string;
+      event: ReturnType<typeof createInternalHookEvent>;
+      expected: boolean;
+    }> = [
+      {
+        name: "returns true for agent:before_prompt_build with prompt + messages",
+        event: createInternalHookEvent("agent", "before_prompt_build", "test-session", {
+          prompt: "hello",
+          messages: [],
+        } satisfies AgentBeforePromptBuildHookContext),
+        expected: true,
+      },
+      {
+        name: "returns false for agent events with other actions",
+        event: createInternalHookEvent("agent", "bootstrap", "test-session", {
+          workspaceDir: "/tmp",
+          bootstrapFiles: [],
+        } satisfies AgentBootstrapHookContext),
+        expected: false,
+      },
+      {
+        name: "returns false when prompt/messages shape is missing",
+        event: createInternalHookEvent("agent", "before_prompt_build", "test-session", {
+          prompt: "hello",
+        }),
+        expected: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      it(testCase.name, () => {
+        expect(isAgentBeforePromptBuildEvent(testCase.event)).toBe(testCase.expected);
       });
     }
   });

@@ -1,3 +1,4 @@
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   chunkByParagraph,
   chunkMarkdownTextWithMode,
@@ -343,6 +344,8 @@ function createMessageSentEmitter(params: {
   sessionKeyForInternalHooks?: string;
   mirrorIsGroup?: boolean;
   mirrorGroupId?: string;
+  agentIdForInternalHooks?: string;
+  cfg?: OpenClawConfig;
 }): { emitMessageSent: (event: MessageSentEvent) => void; hasMessageSentHooks: boolean } {
   const hasMessageSentHooks = params.hookRunner?.hasHooks("message_sent") ?? false;
   const canEmitInternalHook = Boolean(params.sessionKeyForInternalHooks);
@@ -379,12 +382,12 @@ function createMessageSentEmitter(params: {
     }
     fireAndForgetHook(
       triggerInternalHook(
-        createInternalHookEvent(
-          "message",
-          "sent",
-          params.sessionKeyForInternalHooks!,
-          toInternalMessageSentContext(canonical),
-        ),
+        createInternalHookEvent("message", "sent", params.sessionKeyForInternalHooks!, {
+          ...toInternalMessageSentContext(canonical),
+          timestamp: Date.now(),
+          agentId: params.agentIdForInternalHooks,
+          cfg: params.cfg,
+        }),
       ),
       "deliverOutboundPayloads: message:sent internal hook failed",
       (message) => {
@@ -679,6 +682,16 @@ async function deliverOutboundPayloadsCore(
   const sessionKeyForInternalHooks = params.mirror?.sessionKey ?? params.session?.key;
   const mirrorIsGroup = params.mirror?.isGroup;
   const mirrorGroupId = params.mirror?.groupId;
+  const agentIdForInternalHooks =
+    params.mirror?.agentId ??
+    params.session?.agentId ??
+    (sessionKeyForInternalHooks
+      ? resolveSessionAgentId({
+          sessionKey: sessionKeyForInternalHooks,
+          config: params.cfg,
+        })
+      : undefined);
+
   const { emitMessageSent, hasMessageSentHooks } = createMessageSentEmitter({
     hookRunner,
     channel,
@@ -687,6 +700,8 @@ async function deliverOutboundPayloadsCore(
     sessionKeyForInternalHooks,
     mirrorIsGroup,
     mirrorGroupId,
+    agentIdForInternalHooks,
+    cfg: params.cfg,
   });
   const hasMessageSendingHooks = hookRunner?.hasHooks("message_sending") ?? false;
   if (hasMessageSentHooks && params.session?.agentId && !sessionKeyForInternalHooks) {

@@ -172,6 +172,12 @@ export async function dispatchReplyFromConfig(params: {
 
   const sessionStoreEntry = resolveSessionStoreLookup(ctx, cfg);
   const acpDispatchSessionKey = sessionStoreEntry.sessionKey ?? sessionKey;
+  const sessionAgentId = acpDispatchSessionKey
+    ? resolveSessionAgentId({
+        sessionKey: acpDispatchSessionKey,
+        config: cfg,
+      })
+    : undefined;
   const inboundAudio = isInboundAudioContext(ctx);
   const sessionTtsAuto = normalizeTtsAutoMode(sessionStoreEntry.entry?.ttsAuto);
   const hookRunner = getGlobalHookRunner();
@@ -201,7 +207,11 @@ export async function dispatchReplyFromConfig(params: {
       triggerInternalHook(
         createInternalHookEvent("message", "received", sessionKey, {
           ...toInternalMessageReceivedContext(hookContext),
+          senderId: hookContext.senderId,
+          to: hookContext.to,
           timestamp,
+          agentId: sessionAgentId,
+          cfg,
         }),
       ),
       "dispatch-from-config: message_received internal hook failed",

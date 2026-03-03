@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { clearInternalHooks, registerInternalHook } from "../../../hooks/internal-hooks.js";
 import { resolveOllamaBaseUrlForRun } from "../../ollama-stream.js";
 import {
   buildAfterTurnRuntimeContext,
@@ -7,6 +8,7 @@ import {
   isOllamaCompatProvider,
   prependSystemPromptAddition,
   resolveAttemptFsWorkspaceOnly,
+  resolveInternalPromptBuildPrependContext,
   resolveOllamaCompatNumCtxEnabled,
   resolvePromptBuildHookResult,
   resolvePromptModeForSession,
@@ -128,6 +130,42 @@ describe("composeSystemPromptWithHookContext", () => {
         appendSystemContext: "  append only  ",
       }),
     ).toBe("append only");
+  });
+});
+
+describe("resolveInternalPromptBuildPrependContext", () => {
+  it("returns prependContext when agent:before_prompt_build hook mutates context", async () => {
+    clearInternalHooks();
+    registerInternalHook("agent:before_prompt_build", (event) => {
+      event.context.prependContext = "from-internal-hook";
+    });
+
+    const prependContext = await resolveInternalPromptBuildPrependContext({
+      prompt: "hello",
+      messages: [{ role: "user", content: "hello" }],
+      sessionId: "session-1",
+      sessionKey: "agent:main:main",
+      agentId: "main",
+      channelId: "telegram",
+      senderId: "123",
+    });
+
+    expect(prependContext).toBe("from-internal-hook");
+    clearInternalHooks();
+  });
+
+  it("returns undefined when internal hook does not inject prependContext", async () => {
+    clearInternalHooks();
+
+    const prependContext = await resolveInternalPromptBuildPrependContext({
+      prompt: "hello",
+      messages: [],
+      sessionId: "session-1",
+      sessionKey: "agent:main:main",
+    });
+
+    expect(prependContext).toBeUndefined();
+    clearInternalHooks();
   });
 });
 
