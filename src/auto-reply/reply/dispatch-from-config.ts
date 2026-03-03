@@ -158,6 +158,12 @@ export async function dispatchReplyFromConfig(params: {
   }
 
   const sessionStoreEntry = resolveSessionStoreEntry(ctx, cfg);
+  const sessionAgentId = sessionKey
+    ? resolveSessionAgentId({
+        sessionKey,
+        config: cfg,
+      })
+    : undefined;
   const inboundAudio = isInboundAudioContext(ctx);
   const sessionTtsAuto = normalizeTtsAutoMode(sessionStoreEntry.entry?.ttsAuto);
   const hookRunner = getGlobalHookRunner();
@@ -218,12 +224,16 @@ export async function dispatchReplyFromConfig(params: {
     void triggerInternalHook(
       createInternalHookEvent("message", "received", sessionKey, {
         from: ctx.From ?? "",
+        senderId: ctx.SenderId ?? undefined,
+        to: ctx.To ?? undefined,
         content,
         timestamp,
         channelId,
         accountId: ctx.AccountId,
         conversationId,
         messageId: messageIdForHook,
+        agentId: sessionAgentId,
+        cfg,
         metadata: {
           to: ctx.To,
           provider: ctx.Provider,

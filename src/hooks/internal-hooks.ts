@@ -27,6 +27,26 @@ export type AgentBootstrapHookEvent = InternalHookEvent & {
   context: AgentBootstrapHookContext;
 };
 
+export type AgentBeforePromptBuildHookContext = {
+  prompt: string;
+  messages: unknown[];
+  prependContext?: string;
+  cfg?: OpenClawConfig;
+  sessionKey?: string;
+  sessionId?: string;
+  agentId?: string;
+  workspaceDir?: string;
+  messageProvider?: string;
+  channelId?: string;
+  senderId?: string;
+};
+
+export type AgentBeforePromptBuildHookEvent = InternalHookEvent & {
+  type: "agent";
+  action: "before_prompt_build";
+  context: AgentBeforePromptBuildHookContext;
+};
+
 export type GatewayStartupHookContext = {
   cfg?: OpenClawConfig;
   deps?: CliDeps;
@@ -46,6 +66,10 @@ export type GatewayStartupHookEvent = InternalHookEvent & {
 export type MessageReceivedHookContext = {
   /** Sender identifier (e.g., phone number, user ID) */
   from: string;
+  /** Optional sender identifier from provider metadata */
+  senderId?: string;
+  /** Optional recipient identifier from provider metadata */
+  to?: string;
   /** Message content */
   content: string;
   /** Unix timestamp when the message was received */
@@ -60,6 +84,10 @@ export type MessageReceivedHookContext = {
   messageId?: string;
   /** Additional provider-specific metadata */
   metadata?: Record<string, unknown>;
+  /** Active agent id for this session */
+  agentId?: string;
+  /** OpenClaw config snapshot */
+  cfg?: OpenClawConfig;
 };
 
 export type MessageReceivedHookEvent = InternalHookEvent & {
@@ -71,6 +99,10 @@ export type MessageReceivedHookEvent = InternalHookEvent & {
 export type MessageSentHookContext = {
   /** Recipient identifier */
   to: string;
+  /** Optional sender identifier from provider metadata */
+  senderId?: string;
+  /** Optional sender endpoint */
+  from?: string;
   /** Message content */
   content: string;
   /** Whether the message was sent successfully */
@@ -85,6 +117,12 @@ export type MessageSentHookContext = {
   conversationId?: string;
   /** Message ID returned by the provider */
   messageId?: string;
+  /** Unix timestamp when outbound send event was emitted */
+  timestamp?: number;
+  /** Active agent id for this session */
+  agentId?: string;
+  /** OpenClaw config snapshot */
+  cfg?: OpenClawConfig;
 };
 
 export type MessageSentHookEvent = InternalHookEvent & {
@@ -245,6 +283,19 @@ export function isAgentBootstrapEvent(event: InternalHookEvent): event is AgentB
     return false;
   }
   return Array.isArray(context.bootstrapFiles);
+}
+
+export function isAgentBeforePromptBuildEvent(
+  event: InternalHookEvent,
+): event is AgentBeforePromptBuildHookEvent {
+  if (event.type !== "agent" || event.action !== "before_prompt_build") {
+    return false;
+  }
+  const context = event.context as Partial<AgentBeforePromptBuildHookContext> | null;
+  if (!context || typeof context !== "object") {
+    return false;
+  }
+  return typeof context.prompt === "string" && Array.isArray(context.messages);
 }
 
 export function isGatewayStartupEvent(event: InternalHookEvent): event is GatewayStartupHookEvent {

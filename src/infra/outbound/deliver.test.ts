@@ -591,9 +591,12 @@ describe("deliverOutboundPayloads", () => {
         to: "+1555",
         content: "abcd",
         success: true,
+        senderId: "+1555",
         channelId: "whatsapp",
         conversationId: "+1555",
         messageId: "w2",
+        agentId: "main",
+        cfg: expect.any(Object),
       }),
     );
     expect(internalHookMocks.triggerInternalHook).toHaveBeenCalledTimes(1);
@@ -635,9 +638,12 @@ describe("deliverOutboundPayloads", () => {
         to: "+1555",
         content: "hello",
         success: true,
+        senderId: "+1555",
         channelId: "whatsapp",
         conversationId: "+1555",
         messageId: "w1",
+        agentId: "main",
+        cfg: whatsappChunkConfig,
       }),
     );
     expect(internalHookMocks.triggerInternalHook).toHaveBeenCalledTimes(1);

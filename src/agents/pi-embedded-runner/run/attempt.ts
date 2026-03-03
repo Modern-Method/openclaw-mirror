@@ -10,6 +10,7 @@ import {
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { createInternalHookEvent, triggerInternalHook } from "../../../hooks/internal-hooks.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
@@ -342,6 +343,44 @@ export async function resolvePromptBuildHookResult(params: {
       .filter((value): value is string => Boolean(value))
       .join("\n\n"),
   };
+}
+
+export async function resolveInternalPromptBuildPrependContext(params: {
+  prompt: string;
+  messages: unknown[];
+  sessionKey?: string;
+  sessionId: string;
+  agentId?: string;
+  workspaceDir?: string;
+  messageProvider?: string;
+  channelId?: string;
+  senderId?: string | null;
+  cfg?: OpenClawConfig;
+}): Promise<string | undefined> {
+  const hookEvent = createInternalHookEvent(
+    "agent",
+    "before_prompt_build",
+    params.sessionKey ?? params.sessionId,
+    {
+      prompt: params.prompt,
+      messages: params.messages,
+      sessionKey: params.sessionKey,
+      sessionId: params.sessionId,
+      agentId: params.agentId,
+      workspaceDir: params.workspaceDir,
+      messageProvider: params.messageProvider,
+      channelId: params.channelId,
+      senderId: params.senderId ?? undefined,
+      cfg: params.cfg,
+    },
+  );
+  await triggerInternalHook(hookEvent);
+  const prependContext = (hookEvent.context as { prependContext?: unknown }).prependContext;
+  if (typeof prependContext !== "string") {
+    return undefined;
+  }
+  const trimmed = prependContext.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 export function resolvePromptModeForSession(sessionKey?: string): "minimal" | "full" {
@@ -1193,6 +1232,21 @@ export async function runEmbeddedAttempt(
           workspaceDir: params.workspaceDir,
           messageProvider: params.messageProvider ?? undefined,
         };
+        const internalPrependContext = await resolveInternalPromptBuildPrependContext({
+          prompt: params.prompt,
+          messages: activeSession.messages,
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          agentId: hookAgentId,
+          workspaceDir: params.workspaceDir,
+          messageProvider: params.messageProvider ?? undefined,
+          channelId: runtimeChannel ?? params.currentChannelId,
+          senderId: params.senderId,
+          cfg: params.config,
+        }).catch((hookErr: unknown) => {
+          log.warn(`internal before_prompt_build hook failed: ${String(hookErr)}`);
+          return undefined;
+        });
         const hookResult = await resolvePromptBuildHookResult({
           prompt: params.prompt,
           messages: activeSession.messages,
@@ -1201,10 +1255,13 @@ export async function runEmbeddedAttempt(
           legacyBeforeAgentStartResult: params.legacyBeforeAgentStartResult,
         });
         {
-          if (hookResult?.prependContext) {
-            effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;
+          const combinedPrependContext = [internalPrependContext, hookResult?.prependContext]
+            .filter((value): value is string => Boolean(value))
+            .join("\n\n");
+          if (combinedPrependContext) {
+            effectivePrompt = `${combinedPrependContext}\n\n${params.prompt}`;
             log.debug(
-              `hooks: prepended context to prompt (${hookResult.prependContext.length} chars)`,
+              `hooks: prepended context to prompt (${combinedPrependContext.length} chars)`,
             );
           }
           const legacySystemPrompt =

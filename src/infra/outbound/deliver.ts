@@ -1,3 +1,4 @@
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   chunkByParagraph,
   chunkMarkdownTextWithMode,
@@ -454,6 +455,15 @@ async function deliverOutboundPayloadsCore(
   });
   const hookRunner = getGlobalHookRunner();
   const sessionKeyForInternalHooks = params.mirror?.sessionKey ?? params.session?.key;
+  const agentIdForInternalHooks =
+    params.mirror?.agentId ??
+    params.session?.agentId ??
+    (sessionKeyForInternalHooks
+      ? resolveSessionAgentId({
+          sessionKey: sessionKeyForInternalHooks,
+          config: params.cfg,
+        })
+      : undefined);
   if (
     hookRunner?.hasHooks("message_sent") &&
     params.session?.agentId &&
@@ -474,7 +484,7 @@ async function deliverOutboundPayloadsCore(
       mediaUrls: payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []),
       channelData: payload.channelData,
     };
-    const emitMessageSent = (params: {
+    const emitMessageSent = (eventParams: {
       success: boolean;
       content: string;
       error?: string;
@@ -485,9 +495,9 @@ async function deliverOutboundPayloadsCore(
           .runMessageSent(
             {
               to,
-              content: params.content,
-              success: params.success,
-              ...(params.error ? { error: params.error } : {}),
+              content: eventParams.content,
+              success: eventParams.success,
+              ...(eventParams.error ? { error: eventParams.error } : {}),
             },
             {
               channelId: channel,
@@ -503,13 +513,17 @@ async function deliverOutboundPayloadsCore(
       void triggerInternalHook(
         createInternalHookEvent("message", "sent", sessionKeyForInternalHooks, {
           to,
-          content: params.content,
-          success: params.success,
-          ...(params.error ? { error: params.error } : {}),
+          senderId: to,
+          content: eventParams.content,
+          success: eventParams.success,
+          ...(eventParams.error ? { error: eventParams.error } : {}),
           channelId: channel,
           accountId: accountId ?? undefined,
           conversationId: to,
-          messageId: params.messageId,
+          messageId: eventParams.messageId,
+          timestamp: Date.now(),
+          agentId: agentIdForInternalHooks,
+          cfg: params.cfg,
         }),
       ).catch(() => {});
     };

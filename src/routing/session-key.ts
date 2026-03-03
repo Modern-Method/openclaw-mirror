@@ -207,6 +207,37 @@ function resolveLinkedPeerId(params: {
   return null;
 }
 
+export function resolveCanonicalIdentityLink(params: {
+  identityLinks?: Record<string, string[]>;
+  channelId: string;
+  senderId: string;
+}): string | undefined {
+  const canonical = resolveLinkedPeerId({
+    identityLinks: params.identityLinks,
+    channel: params.channelId,
+    peerId: params.senderId,
+  });
+  return canonical ?? undefined;
+}
+
+export function resolveCanonicalResourceId(params: {
+  identityLinks?: Record<string, string[]>;
+  channelId: string;
+  senderId: string;
+}): string {
+  const channelId = normalizeToken(params.channelId);
+  const senderId = params.senderId.trim();
+  const canonical = resolveCanonicalIdentityLink({
+    identityLinks: params.identityLinks,
+    channelId,
+    senderId,
+  });
+  if (canonical) {
+    return canonical;
+  }
+  return `${channelId}:${senderId}`;
+}
+
 export function buildGroupHistoryKey(params: {
   channel: string;
   accountId?: string | null;
