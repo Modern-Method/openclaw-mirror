@@ -39,6 +39,9 @@ export type AgentBeforePromptBuildHookContext = {
   messageProvider?: string;
   channelId?: string;
   senderId?: string;
+  // True when the inbound sender is considered the configured owner (authorization layer).
+  // This allows safe canonical identity fallback when provider senderId is missing.
+  senderIsOwner?: boolean;
 };
 
 export type AgentBeforePromptBuildHookEvent = InternalHookEvent & {
