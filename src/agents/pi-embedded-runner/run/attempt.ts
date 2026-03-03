@@ -355,6 +355,7 @@ export async function resolveInternalPromptBuildPrependContext(params: {
   messageProvider?: string;
   channelId?: string;
   senderId?: string | null;
+  senderIsOwner?: boolean;
   cfg?: OpenClawConfig;
 }): Promise<string | undefined> {
   const hookEvent = createInternalHookEvent(
@@ -371,6 +372,7 @@ export async function resolveInternalPromptBuildPrependContext(params: {
       messageProvider: params.messageProvider,
       channelId: params.channelId,
       senderId: params.senderId ?? undefined,
+      senderIsOwner: params.senderIsOwner,
       cfg: params.cfg,
     },
   );
@@ -1242,6 +1244,7 @@ export async function runEmbeddedAttempt(
           messageProvider: params.messageProvider ?? undefined,
           channelId: runtimeChannel ?? params.currentChannelId,
           senderId: params.senderId,
+          senderIsOwner: params.senderIsOwner,
           cfg: params.config,
         }).catch((hookErr: unknown) => {
           log.warn(`internal before_prompt_build hook failed: ${String(hookErr)}`);
