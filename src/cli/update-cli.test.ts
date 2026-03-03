@@ -470,6 +470,105 @@ describe("update-cli", () => {
     }
   });
 
+  it("refuses custom-branch git updates by default", async () => {
+    vi.mocked(checkUpdateStatus).mockResolvedValue({
+      root: "/test/path",
+      installKind: "git",
+      packageManager: "pnpm",
+      git: {
+        root: "/test/path",
+        sha: "abcdef1234567890",
+        tag: null,
+        branch: "mm/live-ethos",
+        upstream: "origin/main",
+        dirty: false,
+        ahead: 6,
+        behind: 91,
+        fetchOk: true,
+      },
+      deps: {
+        manager: "pnpm",
+        status: "ok",
+        lockfilePath: "/test/path/pnpm-lock.yaml",
+        markerPath: "/test/path/node_modules",
+      },
+    });
+    vi.mocked(defaultRuntime.error).mockClear();
+    vi.mocked(defaultRuntime.exit).mockClear();
+
+    await updateCommand({});
+
+    expect(runGatewayUpdate).not.toHaveBeenCalled();
+    expect(defaultRuntime.error).toHaveBeenCalledWith(expect.stringContaining("mm/live-ethos"));
+    expect(defaultRuntime.error).toHaveBeenCalledWith(
+      expect.stringContaining("--allow-branch-switch"),
+    );
+    expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("allows custom-branch git updates when --allow-branch-switch is set", async () => {
+    vi.mocked(checkUpdateStatus).mockResolvedValue({
+      root: "/test/path",
+      installKind: "git",
+      packageManager: "pnpm",
+      git: {
+        root: "/test/path",
+        sha: "abcdef1234567890",
+        tag: null,
+        branch: "mm/live-ethos",
+        upstream: "origin/main",
+        dirty: false,
+        ahead: 6,
+        behind: 91,
+        fetchOk: true,
+      },
+      deps: {
+        manager: "pnpm",
+        status: "ok",
+        lockfilePath: "/test/path/pnpm-lock.yaml",
+        markerPath: "/test/path/node_modules",
+      },
+    });
+
+    await updateCommand({ allowBranchSwitch: true });
+
+    expect(runGatewayUpdate).toHaveBeenCalled();
+  });
+
+  it("dry-run previews custom-branch git switch without refusing", async () => {
+    vi.mocked(checkUpdateStatus).mockResolvedValue({
+      root: "/test/path",
+      installKind: "git",
+      packageManager: "pnpm",
+      git: {
+        root: "/test/path",
+        sha: "abcdef1234567890",
+        tag: null,
+        branch: "mm/live-ethos",
+        upstream: "origin/main",
+        dirty: false,
+        ahead: 6,
+        behind: 91,
+        fetchOk: true,
+      },
+      deps: {
+        manager: "pnpm",
+        status: "ok",
+        lockfilePath: "/test/path/pnpm-lock.yaml",
+        markerPath: "/test/path/node_modules",
+      },
+    });
+    vi.mocked(defaultRuntime.log).mockClear();
+    vi.mocked(defaultRuntime.exit).mockClear();
+
+    await updateCommand({ dryRun: true });
+
+    expect(runGatewayUpdate).not.toHaveBeenCalled();
+    expect(defaultRuntime.exit).not.toHaveBeenCalledWith(1);
+    const logs = vi.mocked(defaultRuntime.log).mock.calls.map((call) => String(call[0]));
+    expect(logs.join("\n")).toContain("Switch git checkout from mm/live-ethos to main");
+  });
+
   it("parses update status --json as the subcommand option", async () => {
     const program = new Command();
     program.name("openclaw");
@@ -515,6 +614,31 @@ describe("update-cli", () => {
         vi.mocked(readConfigFileSnapshot).mockResolvedValue({
           ...baseSnapshot,
           config: { update: { channel: "beta" } } as OpenClawConfig,
+        });
+        vi.mocked(checkUpdateStatus).mockResolvedValue({
+          root: "/test/path",
+          installKind: "git",
+          packageManager: "pnpm",
+          git: {
+            root: "/test/path",
+            sha: "abcdef1234567890",
+            tag: "v1.2.3-beta.1",
+            branch: "HEAD",
+            upstream: "origin/main",
+            dirty: false,
+            ahead: 0,
+            behind: 0,
+            fetchOk: true,
+          },
+          deps: {
+            manager: "pnpm",
+            status: "ok",
+            lockfilePath: "/test/path/pnpm-lock.yaml",
+            markerPath: "/test/path/node_modules",
+          },
+          registry: {
+            latestVersion: "1.2.3-beta.1",
+          },
         });
       },
       expectedChannel: "beta" as const,

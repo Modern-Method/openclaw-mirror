@@ -44,6 +44,11 @@ export function registerUpdateCli(program: Command) {
       "--tag <dist-tag|version|spec>",
       "Override the package target for this update (dist-tag, version, or package spec)",
     )
+    .option(
+      "--allow-branch-switch",
+      "Allow source updates to switch from a custom git branch to the stock update target",
+      false,
+    )
     .option("--timeout <seconds>", "Timeout for each update step in seconds (default: 1200)")
     .option("--yes", "Skip confirmation prompts (non-interactive)", false)
     .addHelpText("after", () => {
@@ -54,6 +59,10 @@ export function registerUpdateCli(program: Command) {
         ["openclaw update --tag beta", "One-off update to a dist-tag or version"],
         ["openclaw update --tag main", "One-off package install from GitHub main"],
         ["openclaw update --dry-run", "Preview actions without changing anything"],
+        [
+          "openclaw update --allow-branch-switch",
+          "Allow switching a custom source branch to the stock update target",
+        ],
         ["openclaw update --no-restart", "Update without restarting the service"],
         ["openclaw update --json", "Output result as JSON"],
         ["openclaw update --yes", "Non-interactive (accept downgrade prompts)"],
@@ -86,6 +95,7 @@ ${theme.heading("Notes:")}
   - For global installs: auto-updates via detected package manager when possible (see docs/install/updating.md)
   - Downgrades require confirmation (can break configuration)
   - Skips update if the working directory has uncommitted changes
+  - Source installs refuse risky custom-branch switches unless you pass --allow-branch-switch
 
 ${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.openclaw.ai/cli/update")}`;
     })
@@ -97,6 +107,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.openclaw.ai/cli/up
           dryRun: Boolean(opts.dryRun),
           channel: opts.channel as string | undefined,
           tag: opts.tag as string | undefined,
+          allowBranchSwitch: Boolean(opts.allowBranchSwitch),
           timeout: opts.timeout as string | undefined,
           yes: Boolean(opts.yes),
         });

@@ -896,6 +896,9 @@ describe("deliverOutboundPayloads", () => {
         messageId: "w2",
         isGroup: true,
         groupId: "whatsapp:group:123",
+        agentId: "main",
+        cfg: expect.any(Object),
+        timestamp: expect.any(Number),
       }),
     );
     expect(internalHookMocks.triggerInternalHook).toHaveBeenCalledTimes(1);
@@ -916,7 +919,13 @@ describe("deliverOutboundPayloads", () => {
       "message",
       "sent",
       "agent:main:main",
-      expectSuccessfulWhatsAppInternalHookPayload({ content: "hello", messageId: "w1" }),
+      expectSuccessfulWhatsAppInternalHookPayload({
+        content: "hello",
+        messageId: "w1",
+        agentId: "main",
+        cfg: whatsappChunkConfig,
+        timestamp: expect.any(Number),
+      }),
     );
     expect(internalHookMocks.triggerInternalHook).toHaveBeenCalledTimes(1);
   });

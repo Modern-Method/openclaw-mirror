@@ -23,6 +23,7 @@ openclaw update --channel dev
 openclaw update --tag beta
 openclaw update --tag main
 openclaw update --dry-run
+openclaw update --allow-branch-switch
 openclaw update --no-restart
 openclaw update --json
 openclaw --update
@@ -34,6 +35,7 @@ openclaw --update
 - `--channel <stable|beta|dev>`: set the update channel (git + npm; persisted in config).
 - `--tag <dist-tag|version|spec>`: override the package target for this update only. For package installs, `main` maps to `github:openclaw/openclaw#main`.
 - `--dry-run`: preview planned update actions (channel/tag/target/restart flow) without writing config, installing, syncing plugins, or restarting.
+- `--allow-branch-switch`: allow a source-install update to move a custom git branch to the stock update target (for example `main` on dev-channel updates).
 - `--json`: print machine-readable `UpdateRunResult` JSON.
 - `--timeout <seconds>`: per-step timeout (default is 1200s).
 
@@ -82,14 +84,15 @@ Channels:
 High-level:
 
 1. Requires a clean worktree (no uncommitted changes).
-2. Switches to the selected channel (tag or branch).
-3. Fetches upstream (dev only).
-4. Dev only: preflight lint + TypeScript build in a temp worktree; if the tip fails, walks back up to 10 commits to find the newest clean build.
-5. Rebases onto the selected commit (dev only).
-6. Installs deps (pnpm preferred; npm fallback).
-7. Builds + builds the Control UI.
-8. Runs `openclaw doctor` as the final “safe update” check.
-9. Syncs plugins to the active channel (dev uses bundled extensions; stable/beta uses npm) and updates npm-installed plugins.
+2. Refuses risky custom-branch switches by default unless you pass `--allow-branch-switch`.
+3. Switches to the selected channel (tag or branch).
+4. Fetches upstream (dev only).
+5. Dev only: preflight lint + TypeScript build in a temp worktree; if the tip fails, walks back up to 10 commits to find the newest clean build.
+6. Rebases onto the selected commit (dev only).
+7. Installs deps (pnpm preferred; npm fallback).
+8. Builds + builds the Control UI.
+9. Runs `openclaw doctor` as the final “safe update” check.
+10. Syncs plugins to the active channel (dev uses bundled extensions; stable/beta uses npm) and updates npm-installed plugins.
 
 ## `--update` shorthand
 

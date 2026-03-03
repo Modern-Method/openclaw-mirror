@@ -222,6 +222,12 @@ export async function dispatchReplyFromConfig(params: {
   // stale route after thread delivery was intentionally cleared.
   const routeThreadId =
     ctx.MessageThreadId ?? parseSessionThreadInfo(acpDispatchSessionKey).threadId;
+  const sessionAgentId = acpDispatchSessionKey
+    ? resolveSessionAgentId({
+        sessionKey: acpDispatchSessionKey,
+        config: cfg,
+      })
+    : undefined;
   const inboundAudio = isInboundAudioContext(ctx);
   const sessionTtsAuto = normalizeTtsAutoMode(sessionStoreEntry.entry?.ttsAuto);
   const hookRunner = getGlobalHookRunner();
@@ -436,7 +442,11 @@ export async function dispatchReplyFromConfig(params: {
       triggerInternalHook(
         createInternalHookEvent("message", "received", sessionKey, {
           ...toInternalMessageReceivedContext(hookContext),
+          senderId: hookContext.senderId,
+          to: hookContext.to,
           timestamp,
+          agentId: sessionAgentId,
+          cfg,
         }),
       ),
       "dispatch-from-config: message_received internal hook failed",

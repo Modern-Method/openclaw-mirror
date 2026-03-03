@@ -83,6 +83,8 @@ const METHOD_SCOPE_GROUPS: Record<OperatorScope, readonly string[]> = {
     "gateway.identity.get",
     "system-presence",
     "last-heartbeat",
+    "tasks.snapshot",
+    "tasks.events",
     "node.list",
     "node.describe",
     "chat.history",
@@ -115,6 +117,7 @@ const METHOD_SCOPE_GROUPS: Record<OperatorScope, readonly string[]> = {
     "browser.request",
     "push.test",
     "node.pending.enqueue",
+    "tasks.publish",
   ],
   [ADMIN_SCOPE]: [
     "channels.logout",

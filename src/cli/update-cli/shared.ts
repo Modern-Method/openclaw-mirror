@@ -30,6 +30,7 @@ export type UpdateCommandOptions = {
   tag?: string;
   timeout?: string;
   yes?: boolean;
+  allowBranchSwitch?: boolean;
 };
 
 export type UpdateStatusOptions = {

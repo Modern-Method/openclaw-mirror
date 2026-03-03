@@ -24,6 +24,7 @@ export function createGatewayCloseHandler(params: {
   dedupeCleanup: ReturnType<typeof setInterval>;
   mediaCleanup: ReturnType<typeof setInterval> | null;
   agentUnsub: (() => void) | null;
+  taskLedgerAgentUnsub: (() => void) | null;
   heartbeatUnsub: (() => void) | null;
   transcriptUnsub: (() => void) | null;
   lifecycleUnsub: (() => void) | null;
@@ -98,6 +99,13 @@ export function createGatewayCloseHandler(params: {
       if (params.agentUnsub) {
         try {
           params.agentUnsub();
+        } catch {
+          /* ignore */
+        }
+      }
+      if (params.taskLedgerAgentUnsub) {
+        try {
+          params.taskLedgerAgentUnsub();
         } catch {
           /* ignore */
         }

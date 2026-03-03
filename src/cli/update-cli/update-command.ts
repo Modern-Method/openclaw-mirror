@@ -17,6 +17,7 @@ import {
   channelToNpmTag,
   DEFAULT_GIT_CHANNEL,
   DEFAULT_PACKAGE_CHANNEL,
+  DEV_BRANCH,
   normalizeUpdateChannel,
 } from "../../infra/update-channels.js";
 import {
@@ -190,6 +191,13 @@ function resolveServiceRefreshEnv(
   return resolvedEnv;
 }
 
+type GitBranchSwitchGuard = {
+  currentBranch: string | null;
+  currentLabel: string;
+  targetBranch: string | null;
+  targetLabel: string;
+};
+
 type UpdateDryRunPreview = {
   dryRun: true;
   root: string;
@@ -206,6 +214,7 @@ type UpdateDryRunPreview = {
   currentVersion: string | null;
   targetVersion: string | null;
   downgradeRisk: boolean;
+  gitBranchSwitchGuard?: GitBranchSwitchGuard | null;
   actions: string[];
   notes: string[];
 };
@@ -247,6 +256,71 @@ function printDryRunPreview(preview: UpdateDryRunPreview, jsonMode: boolean): vo
       defaultRuntime.log(`  - ${theme.muted(note)}`);
     }
   }
+}
+
+function describeGitLocation(params: { branch?: string | null; tag?: string | null }): string {
+  if (params.branch && params.branch !== "HEAD") {
+    return params.branch;
+  }
+  if (params.tag) {
+    return `detached at ${params.tag}`;
+  }
+  return "detached HEAD";
+}
+
+function resolveGitBranchSwitchGuard(params: {
+  installKind: "git" | "package" | "unknown";
+  updateInstallKind: "git" | "package" | "unknown";
+  channel: "stable" | "beta" | "dev";
+  git?: { branch?: string | null; tag?: string | null };
+}): GitBranchSwitchGuard | null {
+  if (params.installKind !== "git" || params.updateInstallKind !== "git") {
+    return null;
+  }
+
+  const branch = params.git?.branch ?? null;
+  if (!branch) {
+    return null;
+  }
+
+  if (params.channel === "dev") {
+    if (branch === DEV_BRANCH) {
+      return null;
+    }
+    return {
+      currentBranch: branch,
+      currentLabel: describeGitLocation(params.git ?? {}),
+      targetBranch: DEV_BRANCH,
+      targetLabel: DEV_BRANCH,
+    };
+  }
+
+  if (branch === "HEAD") {
+    return null;
+  }
+
+  return {
+    currentBranch: branch,
+    currentLabel: branch,
+    targetBranch: null,
+    targetLabel: `detached ${params.channel} release tag`,
+  };
+}
+
+function formatGitBranchSwitchGuardMessage(params: {
+  guard: GitBranchSwitchGuard;
+  channel: "stable" | "beta" | "dev";
+}): string {
+  return [
+    `You are currently on custom branch state: ${params.guard.currentLabel}`,
+    `Running \`openclaw update\` for channel ${params.channel} would switch the checkout to: ${params.guard.targetLabel}`,
+    "This can discard local patch-lane behavior.",
+    "",
+    "Refusing by default.",
+    "Re-run with one of:",
+    "  --allow-branch-switch",
+    "  --dry-run",
+  ].join("\n");
 }
 
 async function refreshGatewayServiceEnv(params: {
@@ -813,6 +887,13 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     });
   }
 
+  const gitBranchSwitchGuard = resolveGitBranchSwitchGuard({
+    installKind,
+    updateInstallKind,
+    channel,
+    git: updateStatus.git,
+  });
+
   if (opts.dryRun) {
     let mode: UpdateRunResult["mode"] = "unknown";
     if (updateInstallKind === "git") {
@@ -835,6 +916,11 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
       actions.push(`Switch install mode from git to package manager (${mode})`);
     } else if (updateInstallKind === "git") {
       actions.push(`Run git update flow on channel ${channel} (fetch/rebase/build/doctor)`);
+      if (gitBranchSwitchGuard) {
+        actions.push(
+          `Switch git checkout from ${gitBranchSwitchGuard.currentLabel} to ${gitBranchSwitchGuard.targetLabel}`,
+        );
+      }
     } else {
       actions.push(`Run global package manager update with spec ${packageInstallSpec ?? tag}`);
     }
@@ -856,6 +942,11 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     if (explicitTag && !canResolveRegistryVersionForPackageTarget(tag)) {
       notes.push("Non-registry package specs skip npm version lookup and downgrade previews.");
     }
+    if (gitBranchSwitchGuard) {
+      notes.push(
+        `Current git location: ${gitBranchSwitchGuard.currentLabel}. Override the refusal in a real run with --allow-branch-switch.`,
+      );
+    }
 
     printDryRunPreview(
       {
@@ -874,11 +965,23 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
         currentVersion,
         targetVersion,
         downgradeRisk,
+        gitBranchSwitchGuard,
         actions,
         notes,
       },
       Boolean(opts.json),
     );
+    return;
+  }
+
+  if (gitBranchSwitchGuard && !opts.allowBranchSwitch) {
+    defaultRuntime.error(
+      formatGitBranchSwitchGuardMessage({
+        guard: gitBranchSwitchGuard,
+        channel,
+      }),
+    );
+    defaultRuntime.exit(1);
     return;
   }
 
@@ -912,6 +1015,13 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
   if (updateInstallKind === "git" && opts.tag && !opts.json) {
     defaultRuntime.log(
       theme.muted("Note: --tag applies to npm installs only; git updates ignore it."),
+    );
+  }
+  if (gitBranchSwitchGuard && opts.allowBranchSwitch && !opts.json) {
+    defaultRuntime.log(
+      theme.warn(
+        `Proceeding with custom branch switch: ${gitBranchSwitchGuard.currentLabel} -> ${gitBranchSwitchGuard.targetLabel}.`,
+      ),
     );
   }
 

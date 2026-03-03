@@ -103,6 +103,9 @@ const BASE_METHODS = [
   "gateway.identity.get",
   "system-presence",
   "system-event",
+  "tasks.snapshot",
+  "tasks.events",
+  "tasks.publish",
   "send",
   "agent",
   "agent.identity.get",
@@ -141,5 +144,6 @@ export const GATEWAY_EVENTS = [
   "voicewake.changed",
   "exec.approval.requested",
   "exec.approval.resolved",
+  "tasks.ledger",
   GATEWAY_EVENT_UPDATE_AVAILABLE,
 ];

@@ -29,13 +29,16 @@ function incrementIssue(issues: CronStoreIssues, key: CronStoreIssueKey) {
 
 function normalizePayloadKind(payload: Record<string, unknown>) {
   const raw = typeof payload.kind === "string" ? payload.kind.trim().toLowerCase() : "";
+
   if (raw === "agentturn") {
+    // Only treat as legacy if the stored value is actually not normalized.
     if (payload.kind !== "agentTurn") {
       payload.kind = "agentTurn";
       return true;
     }
     return false;
   }
+
   if (raw === "systemevent") {
     if (payload.kind !== "systemEvent") {
       payload.kind = "systemEvent";
@@ -43,6 +46,7 @@ function normalizePayloadKind(payload: Record<string, unknown>) {
     }
     return false;
   }
+
   return false;
 }
 

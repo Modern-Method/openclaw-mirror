@@ -142,6 +142,7 @@ import {
   mergeGatewayTailscaleConfig,
 } from "./startup-auth.js";
 import { maybeSeedControlUiAllowedOriginsAtStartup } from "./startup-control-ui-origins.js";
+import { createTaskLedgerAgentActivityListener } from "./task-ledger-agent-activity.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
 
@@ -781,6 +782,7 @@ export async function startGatewayServer(
       dedupeCleanup,
       mediaCleanup,
       agentUnsub,
+      taskLedgerAgentUnsub,
       heartbeatUnsub,
       transcriptUnsub,
       lifecycleUnsub,
@@ -825,6 +827,7 @@ export async function startGatewayServer(
   const { getRuntimeSnapshot, startChannels, startChannel, stopChannel, markChannelLoggedOut } =
     channelManager;
   let agentUnsub: (() => void) | null = null;
+  let taskLedgerAgentUnsub: (() => void) | null = null;
   let heartbeatUnsub: (() => void) | null = null;
   let transcriptUnsub: (() => void) | null = null;
   let lifecycleUnsub: (() => void) | null = null;
@@ -906,6 +909,18 @@ export async function startGatewayServer(
             clearAgentRunContext,
             toolEventRecipients,
             sessionEventSubscribers,
+          }),
+        );
+
+    taskLedgerAgentUnsub = minimalTestGateway
+      ? null
+      : onAgentEvent(
+          createTaskLedgerAgentActivityListener({
+            broadcast,
+            publish: publishTaskLedgerEvents,
+            onError: (err) => {
+              log.warn(`task-ledger agent activity write failed: ${String(err)}`);
+            },
           }),
         );
 
@@ -1389,6 +1404,7 @@ export async function startGatewayServer(
     dedupeCleanup,
     mediaCleanup,
     agentUnsub,
+    taskLedgerAgentUnsub,
     heartbeatUnsub,
     transcriptUnsub,
     lifecycleUnsub,
