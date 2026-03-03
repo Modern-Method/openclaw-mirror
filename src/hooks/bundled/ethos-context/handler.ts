@@ -508,6 +508,12 @@ const ethosContextHook: HookHandler = async (event) => {
     : senderIsOwner
       ? resolveOwnerCanonicalIdentityKey(cfg?.session?.identityLinks)
       : undefined;
+
+  if (!resourceId && !senderId) {
+    log.debug("Ethos context senderId missing (and not owner); skipping scoped injection");
+    return;
+  }
+
   const threadId = event.sessionKey;
 
   const nowMs = Date.now();
@@ -515,11 +521,6 @@ const ethosContextHook: HookHandler = async (event) => {
     log.debug("Ethos context search circuit breaker active; skipping injection", {
       retryInMs: Math.max(0, searchCircuitState.openUntilMs - nowMs),
     });
-    return;
-  }
-
-  if (!resourceId && !senderId) {
-    log.debug("Ethos context senderId missing (and not owner); skipping scoped injection");
     return;
   }
 
