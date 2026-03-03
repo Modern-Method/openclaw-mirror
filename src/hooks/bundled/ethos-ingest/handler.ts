@@ -55,7 +55,7 @@ function normalizeAgentId(value?: string): string | undefined {
 
 function isCanaryAllowed(canaryAgents: string[], agentId?: string): boolean {
   if (canaryAgents.length === 0) {
-    return true;
+    return false;
   }
   const normalizedAgentId = normalizeAgentId(agentId);
   if (!normalizedAgentId) {
