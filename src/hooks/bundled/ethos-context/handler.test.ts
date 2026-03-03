@@ -60,7 +60,6 @@ function buildSearchResponse() {
             rank: 2,
             metadata_scores: {
               resourceId: 1,
-              threadId: 1,
             },
           },
         },
