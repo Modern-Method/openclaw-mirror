@@ -55,19 +55,26 @@ This hook is **disabled by default**. Enable it explicitly with `hooks.internal.
 
 ## Search Scoping
 
-The hook sends scoped search filters in the request body:
+The hook only runs when both `channelId` and `senderId` are present.
+
+It sends scoped search filters in the request body:
 
 - `query`
 - `limit`
 - `agentId`
-- `threadId` (session key)
 - `resourceId` (canonical identity resolved from `session.identityLinks`, `channelId`, `senderId`)
+- `threadId` (session key) only when `resourceId` is unavailable
+
+Client-side scope hardening is also applied before injection:
+
+- each recalled item must match requested `resourceId`
+- when `threadId` is used, each recalled item must also match requested `threadId`
 
 Ethos response parsing expects:
 
 - recall entries under `results[]` (with compatibility fallbacks)
-- stored ingest metadata under `results[].metadata`
-- retrieval signals under `results[].retrieval` and `results[].metadata_scores`
+- scope metadata from `results[].metadata`
+- ranking score from `results[].retrieval`
 
 ## Prompt-Injection Hardening
 
@@ -78,6 +85,8 @@ Injected recall is rendered as:
 - explicit instruction that recalled memories are untrusted quoted data
 - `memories` encoded as a JSON array (no markdown headings/lists)
 - delimiter collision escaping inside string fields
+- strict field whitelist per memory (`text`, `id`, `created_at`, `source`, `score`, optional `resource_id`/`thread_id`)
+  - raw `metadata`, `retrieval`, and `metadata_scores` objects are never injected
 
 ## Circuit Breaker
 

@@ -131,6 +131,36 @@ describe("ethos-ingest hook", () => {
     expect(body.metadata.resourceId).toBe("telegram:9999");
   });
 
+  it("denies ingest when canaryAgents is empty", async () => {
+    const cfg = createConfig({ canaryAgents: [] });
+    const event = createHookEvent("message", "sent", "agent:main:main", {
+      to: "telegram:8480568759",
+      content: "pong",
+      success: true,
+      channelId: "telegram",
+      cfg,
+      agentId: "main",
+    });
+
+    await handler(event);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("denies ingest when canaryAgents is not configured", async () => {
+    const cfg = createConfig();
+    const event = createHookEvent("message", "sent", "agent:main:main", {
+      to: "telegram:8480568759",
+      content: "pong",
+      success: true,
+      channelId: "telegram",
+      cfg,
+      agentId: "main",
+    });
+
+    await handler(event);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("skips non-canary agents", async () => {
     const cfg = createConfig({ canaryAgents: ["ops"] });
     const event = createHookEvent("message", "sent", "agent:main:main", {

@@ -46,7 +46,8 @@ This hook is **disabled by default**. Enable it explicitly with `hooks.internal.
 - `ethosUrl`: Ethos base URL (the hook posts to `/ingest`).
 - `apiKey`: optional bearer token for Ethos API auth.
 - `timeoutMs`: strict request timeout in milliseconds.
-- `canaryAgents`: optional list of agent IDs allowed to emit ingest calls.
+- `canaryAgents`: required allowlist of agent IDs allowed to emit ingest calls.
+  - Empty/missing `canaryAgents` means no agents are allowed (safe default).
 
 ## Failure Mode
 

@@ -36,11 +36,11 @@ type EthosContextConfig = {
 type EthosSearchRecord = {
   text: string;
   id?: string;
-  timestamp?: string;
+  createdAt?: string;
   source?: string;
-  metadata?: Record<string, unknown>;
-  retrieval?: Record<string, unknown>;
-  metadataScores?: Record<string, unknown>;
+  score?: number;
+  resourceId?: string;
+  threadId?: string;
 };
 
 type SearchCircuitState = {
@@ -59,6 +59,17 @@ function resolveOptionalString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function resolveOptionalFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 function resolvePositiveInt(value: unknown, fallback: number): number {
@@ -87,6 +98,11 @@ function resolveStringArray(value: unknown): string[] {
 }
 
 function normalizeAgentId(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed.toLowerCase() : undefined;
+}
+
+function normalizeScopeValue(value?: string): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed.toLowerCase() : undefined;
 }
@@ -140,11 +156,40 @@ function extractTimestamp(value: unknown): string | undefined {
   return resolveOptionalString(value);
 }
 
+function resolveMetadataResourceId(metadata?: Record<string, unknown>): string | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  return resolveOptionalString(metadata.resourceId) ?? resolveOptionalString(metadata.resource_id);
+}
+
+function resolveMetadataThreadId(metadata?: Record<string, unknown>): string | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  return resolveOptionalString(metadata.threadId) ?? resolveOptionalString(metadata.thread_id);
+}
+
+function resolveRecordScore(params: {
+  record: Record<string, unknown>;
+  retrieval?: Record<string, unknown>;
+}): number | undefined {
+  const fromRecord =
+    resolveOptionalFiniteNumber(params.record.score) ??
+    resolveOptionalFiniteNumber(params.record.similarity);
+  if (fromRecord !== undefined) {
+    return fromRecord;
+  }
+  return (
+    resolveOptionalFiniteNumber(params.retrieval?.score) ??
+    resolveOptionalFiniteNumber(params.retrieval?.similarity)
+  );
+}
+
 function extractRecordFromObject(value: Record<string, unknown>): EthosSearchRecord | null {
   const memory = asObject(value.memory);
   const metadata = asObject(value.metadata) ?? asObject(memory?.metadata) ?? undefined;
   const retrieval = asObject(value.retrieval) ?? undefined;
-  const metadataScores = asObject(value.metadata_scores) ?? asObject(retrieval?.metadata_scores);
 
   const contentCandidate =
     resolveOptionalString(value.content) ??
@@ -155,26 +200,28 @@ function extractRecordFromObject(value: Record<string, unknown>): EthosSearchRec
     return null;
   }
 
+  const createdAt =
+    extractTimestamp(value.createdAt) ??
+    extractTimestamp(value.timestamp) ??
+    extractTimestamp(value.updatedAt) ??
+    extractTimestamp(metadata?.messageTimestamp) ??
+    extractTimestamp(metadata?.eventTimestamp) ??
+    extractTimestamp(metadata?.ingestTimestamp);
+
   return {
     text: contentCandidate,
     id:
       resolveOptionalString(value.id) ??
       resolveOptionalString(value.recordId) ??
       resolveOptionalString(value.memoryId),
-    timestamp:
-      extractTimestamp(value.timestamp) ??
-      extractTimestamp(value.createdAt) ??
-      extractTimestamp(value.updatedAt) ??
-      extractTimestamp(metadata?.messageTimestamp) ??
-      extractTimestamp(metadata?.eventTimestamp) ??
-      extractTimestamp(metadata?.ingestTimestamp),
+    createdAt,
     source:
       resolveOptionalString(value.source) ??
       resolveOptionalString(value.type) ??
       resolveOptionalString(metadata?.source),
-    metadata,
-    retrieval,
-    metadataScores: metadataScores ?? undefined,
+    score: resolveRecordScore({ record: value, retrieval }),
+    resourceId: resolveMetadataResourceId(metadata),
+    threadId: resolveMetadataThreadId(metadata),
   };
 }
 
@@ -225,46 +272,6 @@ function escapeDelimiterCollision(value: string): string {
     .replaceAll(CONTEXT_BLOCK_END, "<OPENCLAW_ETHOS_RECALL_JSON_END_ESCAPED>");
 }
 
-function sanitizeJsonValue(value: unknown, depth = 0): unknown {
-  if (depth > 6 || value == null) {
-    return undefined;
-  }
-
-  if (typeof value === "string") {
-    return escapeDelimiterCollision(value);
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  if (typeof value === "boolean") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    const arrayValues: unknown[] = [];
-    for (const item of value) {
-      const sanitized = sanitizeJsonValue(item, depth + 1);
-      if (sanitized !== undefined) {
-        arrayValues.push(sanitized);
-      }
-    }
-    return arrayValues.length > 0 ? arrayValues : undefined;
-  }
-
-  const objectValue = asObject(value);
-  if (!objectValue) {
-    return undefined;
-  }
-
-  const output: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(objectValue)) {
-    const sanitized = sanitizeJsonValue(entry, depth + 1);
-    if (sanitized !== undefined) {
-      output[key] = sanitized;
-    }
-  }
-  return Object.keys(output).length > 0 ? output : undefined;
-}
-
 function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: number }): string {
   const total = params.records.length;
   if (total === 0) {
@@ -273,27 +280,27 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
 
   let entriesToKeep = total;
   let textLimit = 600;
-  let includeProvenance = true;
+  let includeOptionalFields = true;
 
   while (entriesToKeep >= 1) {
     const selected = params.records.slice(0, entriesToKeep);
-    const memories = selected.map((record) => {
-      const core = compactRecord({
+    const memories = selected.map((record) =>
+      compactRecord({
         text: escapeDelimiterCollision(normalizeContent(record.text, textLimit)),
         id: record.id ? escapeDelimiterCollision(record.id) : undefined,
-        timestamp: record.timestamp ? escapeDelimiterCollision(record.timestamp) : undefined,
+        created_at: record.createdAt ? escapeDelimiterCollision(record.createdAt) : undefined,
         source: record.source ? escapeDelimiterCollision(record.source) : undefined,
-      });
-      if (!includeProvenance) {
-        return core;
-      }
-      return compactRecord({
-        ...core,
-        metadata: sanitizeJsonValue(record.metadata),
-        retrieval: sanitizeJsonValue(record.retrieval),
-        metadata_scores: sanitizeJsonValue(record.metadataScores),
-      });
-    });
+        score: includeOptionalFields ? record.score : undefined,
+        resource_id:
+          includeOptionalFields && record.resourceId
+            ? escapeDelimiterCollision(record.resourceId)
+            : undefined,
+        thread_id:
+          includeOptionalFields && record.threadId
+            ? escapeDelimiterCollision(record.threadId)
+            : undefined,
+      }),
+    );
 
     const payload = compactRecord({
       type: "ethos_recall_v2",
@@ -317,8 +324,8 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
       continue;
     }
 
-    if (includeProvenance) {
-      includeProvenance = false;
+    if (includeOptionalFields) {
+      includeOptionalFields = false;
       continue;
     }
 
@@ -332,6 +339,30 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
   }
 
   return "";
+}
+
+function recordMatchesScope(params: {
+  record: EthosSearchRecord;
+  resourceId: string;
+  threadId?: string;
+}): boolean {
+  const expectedResourceId = normalizeScopeValue(params.resourceId);
+  const recordResourceId = normalizeScopeValue(params.record.resourceId);
+  if (!expectedResourceId || !recordResourceId || recordResourceId !== expectedResourceId) {
+    return false;
+  }
+
+  const expectedThreadId = normalizeScopeValue(params.threadId);
+  if (!expectedThreadId) {
+    return true;
+  }
+
+  const recordThreadId = normalizeScopeValue(params.record.threadId);
+  if (!recordThreadId || recordThreadId !== expectedThreadId) {
+    return false;
+  }
+
+  return true;
 }
 
 function pruneSearchFailures(nowMs: number): void {
@@ -434,16 +465,22 @@ const ethosContextHook: HookHandler = async (event) => {
     return;
   }
 
-  const channelId = resolveOptionalString(context.channelId);
   const senderId = resolveOptionalString(context.senderId);
-  const resourceId =
-    channelId && senderId
-      ? resolveCanonicalResourceId({
-          identityLinks: cfg?.session?.identityLinks,
-          channelId,
-          senderId,
-        })
-      : undefined;
+  if (!senderId) {
+    log.debug("Ethos context senderId missing; skipping scoped injection");
+    return;
+  }
+  const channelId = resolveOptionalString(context.channelId);
+  if (!channelId) {
+    log.debug("Ethos context channelId missing; skipping scoped injection");
+    return;
+  }
+
+  const resourceId = resolveCanonicalResourceId({
+    identityLinks: cfg?.session?.identityLinks,
+    channelId,
+    senderId,
+  });
   const threadId = event.sessionKey;
 
   const nowMs = Date.now();
@@ -468,6 +505,8 @@ const ethosContextHook: HookHandler = async (event) => {
   });
   const timeoutMs = resolvePositiveInt(hookConfig.timeoutMs, DEFAULT_TIMEOUT_MS);
 
+  const requestedThreadId = resourceId ? undefined : threadId;
+
   try {
     const searchResponse = await postSearchWithTimeout({
       url: searchUrl,
@@ -477,7 +516,7 @@ const ethosContextHook: HookHandler = async (event) => {
         query,
         limit,
         resourceId,
-        threadId,
+        threadId: requestedThreadId,
         agentId,
       }),
     });
@@ -489,12 +528,20 @@ const ethosContextHook: HookHandler = async (event) => {
 
     recordSearchSuccess();
 
-    const records = extractSearchRecords(searchResponse).slice(0, limit);
-    if (records.length === 0) {
+    const scopedRecords = extractSearchRecords(searchResponse)
+      .filter((record) =>
+        recordMatchesScope({
+          record,
+          resourceId,
+          threadId: requestedThreadId,
+        }),
+      )
+      .slice(0, limit);
+    if (scopedRecords.length === 0) {
       return;
     }
 
-    const prependContext = buildContextBlock({ records, maxChars });
+    const prependContext = buildContextBlock({ records: scopedRecords, maxChars });
     if (!prependContext) {
       return;
     }
