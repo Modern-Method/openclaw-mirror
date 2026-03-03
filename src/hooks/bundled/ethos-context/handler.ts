@@ -230,7 +230,6 @@ function extractRecordFromObject(value: Record<string, unknown>): EthosSearchRec
     extractTimestamp(metadata?.messageTimestamp) ??
     extractTimestamp(metadata?.eventTimestamp) ??
     extractTimestamp(metadata?.ingestTimestamp);
-
   return {
     text: contentCandidate,
     id:
@@ -366,26 +365,26 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
 
 function recordMatchesScope(params: {
   record: EthosSearchRecord;
-  resourceId: string;
+  resourceId?: string;
   threadId?: string;
 }): boolean {
   const expectedResourceId = normalizeScopeValue(params.resourceId);
-  const recordResourceId = normalizeScopeValue(params.record.resourceId);
-  if (!expectedResourceId || !recordResourceId || recordResourceId !== expectedResourceId) {
-    return false;
+  if (expectedResourceId) {
+    const recordResourceId = normalizeScopeValue(params.record.resourceId);
+    if (!recordResourceId || recordResourceId !== expectedResourceId) {
+      return false;
+    }
   }
 
   const expectedThreadId = normalizeScopeValue(params.threadId);
-  if (!expectedThreadId) {
-    return true;
+  if (expectedThreadId) {
+    const recordThreadId = normalizeScopeValue(params.record.threadId);
+    if (!recordThreadId || recordThreadId !== expectedThreadId) {
+      return false;
+    }
   }
 
-  const recordThreadId = normalizeScopeValue(params.record.threadId);
-  if (!recordThreadId || recordThreadId !== expectedThreadId) {
-    return false;
-  }
-
-  return true;
+  return Boolean(expectedResourceId || expectedThreadId);
 }
 
 function pruneSearchFailures(nowMs: number): void {
@@ -509,12 +508,6 @@ const ethosContextHook: HookHandler = async (event) => {
     : senderIsOwner
       ? resolveOwnerCanonicalIdentityKey(cfg?.session?.identityLinks)
       : undefined;
-
-  if (!resourceId && !senderId) {
-    log.debug("Ethos context senderId missing (and not owner); skipping scoped injection");
-    return;
-  }
-
   const threadId = event.sessionKey;
 
   const nowMs = Date.now();
@@ -522,6 +515,11 @@ const ethosContextHook: HookHandler = async (event) => {
     log.debug("Ethos context search circuit breaker active; skipping injection", {
       retryInMs: Math.max(0, searchCircuitState.openUntilMs - nowMs),
     });
+    return;
+  }
+
+  if (!resourceId && !senderId) {
+    log.debug("Ethos context senderId missing (and not owner); skipping scoped injection");
     return;
   }
 

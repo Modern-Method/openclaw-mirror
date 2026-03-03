@@ -55,20 +55,24 @@ This hook is **disabled by default**. Enable it explicitly with `hooks.internal.
 
 ## Search Scoping
 
-The hook only runs when both `channelId` and `senderId` are present.
+The hook only runs when `channelId` is present and the sender can be scoped to either:
+
+- a canonical `resourceId` resolved from `session.identityLinks`, `channelId`, and `senderId`
+- an owner canonical identity for direct-owner DMs when `senderIsOwner` is true
+- otherwise, a `threadId` fallback when `senderId` is present but canonical resolution is unavailable
 
 It sends scoped search filters in the request body:
 
 - `query`
 - `limit`
 - `agentId`
-- `resourceId` (canonical identity resolved from `session.identityLinks`, `channelId`, `senderId`)
+- `resourceId` when canonical identity resolution succeeds
 - `threadId` (session key) only when `resourceId` is unavailable
 
 Client-side scope hardening is also applied before injection:
 
-- each recalled item must match requested `resourceId`
-- when `threadId` is used, each recalled item must also match requested `threadId`
+- each recalled item must match requested `resourceId` when one was requested
+- when `threadId` fallback is used, each recalled item must also match requested `threadId`
 
 Ethos response parsing expects:
 

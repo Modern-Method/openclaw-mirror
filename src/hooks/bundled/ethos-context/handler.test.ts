@@ -60,6 +60,7 @@ function buildSearchResponse() {
             rank: 2,
             metadata_scores: {
               resourceId: 1,
+              threadId: 1,
             },
           },
         },
@@ -211,6 +212,59 @@ describe("ethos-context hook", () => {
     expect(memories[0]?.retrieval).toBeUndefined();
     expect(memories[0]?.metadata_scores).toBeUndefined();
     expect(JSON.stringify(payload)).not.toContain("should-never-be-exposed");
+  });
+
+  it("falls back to thread-only scoping when canonical resource resolution is unavailable", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        results: [
+          {
+            id: "thread-match",
+            content: "Scoped by thread only",
+            createdAt: "1710000003000",
+            metadata: {
+              threadId: "agent:main:main",
+            },
+            retrieval: {
+              score: 0.88,
+            },
+          },
+          {
+            id: "thread-miss",
+            content: "Should be dropped",
+            createdAt: "1710000004000",
+            metadata: {
+              threadId: "agent:main:other",
+            },
+            retrieval: {
+              score: 0.87,
+            },
+          },
+        ],
+      }),
+    });
+
+    const cfg = createConfig({ canaryAgents: ["main"] });
+    const event = createScopedEvent(cfg, { senderId: "9999999999" });
+
+    await handler(event);
+
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const requestBody = JSON.parse(request.body as string) as Record<string, unknown>;
+    expect(requestBody.resourceId).toBeUndefined();
+    expect(requestBody.threadId).toBe("agent:main:main");
+
+    const payload = extractPrependPayload(
+      String((event.context as { prependContext?: unknown }).prependContext),
+    );
+    expect(payload.memories).toEqual([
+      expect.objectContaining({
+        id: "thread-match",
+        thread_id: "agent:main:main",
+      }),
+    ]);
   });
 
   it("skips injection when senderId is missing", async () => {
