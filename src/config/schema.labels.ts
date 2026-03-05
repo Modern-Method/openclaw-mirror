@@ -405,6 +405,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.cliBackends": "CLI Backends",
   "agents.defaults.compaction": "Compaction",
   "agents.defaults.compaction.mode": "Compaction Mode",
+  "agents.defaults.compaction.manualTimeoutMs": "Compaction Manual Timeout (ms)",
   "agents.defaults.compaction.reserveTokens": "Compaction Reserve Tokens",
   "agents.defaults.compaction.keepRecentTokens": "Compaction Keep Recent Tokens",
   "agents.defaults.compaction.reserveTokensFloor": "Compaction Reserve Token Floor",
@@ -428,7 +429,8 @@ export const FIELD_LABELS: Record<string, string> = {
   "agents.defaults.compaction.v2.keepRecentRatio": "Compaction v2 Keep Recent Ratio",
   "agents.defaults.compaction.v2.reserveRatio": "Compaction v2 Reserve Ratio",
   "agents.defaults.compaction.v2.drainTargetRatio": "Compaction v2 Drain Target Ratio",
-  "agents.defaults.compaction.v2.checkpointLedgerEnabled": "Compaction v2 Checkpoint Ledger Enabled",
+  "agents.defaults.compaction.v2.checkpointLedgerEnabled":
+    "Compaction v2 Checkpoint Ledger Enabled",
   "agents.defaults.compaction.v2.checkpointLedgerPath": "Compaction v2 Checkpoint Ledger Path",
   "agents.defaults.compaction.v2.ethosIngestHintMode": "Compaction v2 Ethos Ingest Hint Mode",
   "agents.defaults.embeddedPi": "Embedded Pi",

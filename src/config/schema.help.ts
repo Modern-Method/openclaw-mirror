@@ -914,6 +914,8 @@ export const FIELD_HELP: Record<string, string> = {
     "Compaction tuning for when context nears token limits, including history share, reserve headroom, and pre-compaction memory flush behavior. Use this when long-running sessions need stable continuity under tight context windows.",
   "agents.defaults.compaction.mode":
     'Compaction strategy mode: "default" uses baseline behavior, while "safeguard" applies stricter guardrails to preserve recent context. Keep "default" unless you observe aggressive history loss near limit boundaries.',
+  "agents.defaults.compaction.manualTimeoutMs":
+    "Safety timeout ceiling (ms) for manual compaction runs triggered via /compact. Increase this when very large contexts regularly hit the default 15 minute cap.",
   "agents.defaults.compaction.reserveTokens":
     "Token headroom reserved for reply generation and tool output after compaction runs. Use higher reserves for verbose/tool-heavy sessions, and lower reserves when maximizing retained history matters more.",
   "agents.defaults.compaction.keepRecentTokens":
@@ -940,18 +942,29 @@ export const FIELD_HELP: Record<string, string> = {
     "Compaction v2 controls (anchored summary chain + checkpoint persistence). Disabled by default for backward compatibility.",
   "agents.defaults.compaction.v2.enabled":
     "Enable anchored-chain compaction v2 behavior in safeguard mode. When false, existing compaction behavior is preserved.",
-  "agents.defaults.compaction.v2.templateVersion": "Compaction v2 template version label (default: v1).",
-  "agents.defaults.compaction.v2.maxSummaryNodes": "Maximum anchored summary nodes retained before merge.",
-  "agents.defaults.compaction.v2.maxNodeTokens": "Per-node token budget for anchored summary nodes.",
-  "agents.defaults.compaction.v2.maxChainTokens": "Total token budget across all anchored summary nodes.",
+  "agents.defaults.compaction.v2.templateVersion":
+    "Compaction v2 template version label (default: v1).",
+  "agents.defaults.compaction.v2.maxSummaryNodes":
+    "Maximum anchored summary nodes retained before merge.",
+  "agents.defaults.compaction.v2.maxNodeTokens":
+    "Per-node token budget for anchored summary nodes.",
+  "agents.defaults.compaction.v2.maxChainTokens":
+    "Total token budget across all anchored summary nodes.",
   "agents.defaults.compaction.v2.mergePolicy": "Merge strategy when chain caps are exceeded.",
-  "agents.defaults.compaction.v2.pinnedFactsPath": "Workspace-relative pinned facts file injected verbatim.",
-  "agents.defaults.compaction.v2.keepRecentRatio": "Dynamic keep-recent ratio of context window (default 0.08).",
-  "agents.defaults.compaction.v2.reserveRatio": "Dynamic reserve ratio of context window (default 0.10).",
-  "agents.defaults.compaction.v2.drainTargetRatio": "Post-compaction drain target ratio (default 0.60).",
-  "agents.defaults.compaction.v2.checkpointLedgerEnabled": "Enable local append-only checkpoint ledger writes.",
-  "agents.defaults.compaction.v2.checkpointLedgerPath": "Checkpoint ledger path (supports YYYY-MM-DD placeholder).",
-  "agents.defaults.compaction.v2.ethosIngestHintMode": "Emit hook-friendly Ethos ingest metadata hints in checkpoint payloads.",
+  "agents.defaults.compaction.v2.pinnedFactsPath":
+    "Workspace-relative pinned facts file injected verbatim.",
+  "agents.defaults.compaction.v2.keepRecentRatio":
+    "Dynamic keep-recent ratio of context window (default 0.08).",
+  "agents.defaults.compaction.v2.reserveRatio":
+    "Dynamic reserve ratio of context window (default 0.10).",
+  "agents.defaults.compaction.v2.drainTargetRatio":
+    "Post-compaction drain target ratio (default 0.60).",
+  "agents.defaults.compaction.v2.checkpointLedgerEnabled":
+    "Enable local append-only checkpoint ledger writes.",
+  "agents.defaults.compaction.v2.checkpointLedgerPath":
+    "Checkpoint ledger path (supports YYYY-MM-DD placeholder).",
+  "agents.defaults.compaction.v2.ethosIngestHintMode":
+    "Emit hook-friendly Ethos ingest metadata hints in checkpoint payloads.",
   "agents.defaults.embeddedPi":
     "Embedded Pi runner hardening controls for how workspace-local Pi settings are trusted and applied in OpenClaw sessions.",
   "agents.defaults.embeddedPi.projectSettingsPolicy":

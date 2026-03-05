@@ -80,6 +80,7 @@ export const AgentDefaultsSchema = z
     compaction: z
       .object({
         mode: z.union([z.literal("default"), z.literal("safeguard")]).optional(),
+        manualTimeoutMs: z.number().int().positive().optional(),
         reserveTokens: z.number().int().nonnegative().optional(),
         keepRecentTokens: z.number().int().positive().optional(),
         reserveTokensFloor: z.number().int().nonnegative().optional(),
@@ -111,7 +112,9 @@ export const AgentDefaultsSchema = z
             drainTargetRatio: z.number().positive().max(1).optional(),
             checkpointLedgerEnabled: z.boolean().optional(),
             checkpointLedgerPath: z.string().optional(),
-            ethosIngestHintMode: z.union([z.literal("none"), z.literal("hook-friendly")]).optional(),
+            ethosIngestHintMode: z
+              .union([z.literal("none"), z.literal("hook-friendly")])
+              .optional(),
           })
           .strict()
           .optional(),

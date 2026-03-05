@@ -290,6 +290,8 @@ export type AgentCompactionV2Config = {
 export type AgentCompactionConfig = {
   /** Compaction summarization mode. */
   mode?: AgentCompactionMode;
+  /** Manual compaction safety timeout ceiling in milliseconds (default: 1800000). */
+  manualTimeoutMs?: number;
   /** Pi reserve tokens target before floor enforcement. */
   reserveTokens?: number;
   /** Pi keepRecentTokens budget used for cut-point selection. */

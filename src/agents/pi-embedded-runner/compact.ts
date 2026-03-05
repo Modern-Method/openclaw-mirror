@@ -85,6 +85,16 @@ import type { EmbeddedPiCompactResult } from "./types.js";
 import { describeUnknownError, mapThinkingLevel } from "./utils.js";
 import { flushPendingToolResultsAfterIdle } from "./wait-for-idle-before-flush.js";
 
+const DEFAULT_MANUAL_COMPACTION_TIMEOUT_MS = 1_800_000;
+
+function resolveManualCompactionTimeoutMs(cfg?: OpenClawConfig): number {
+  const raw = cfg?.agents?.defaults?.compaction?.manualTimeoutMs;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return raw;
+  }
+  return DEFAULT_MANUAL_COMPACTION_TIMEOUT_MS;
+}
+
 export type CompactEmbeddedPiSessionParams = {
   sessionId: string;
   runId?: string;
@@ -252,7 +262,10 @@ export async function compactEmbeddedPiSessionDirect(
   const trigger = params.trigger ?? "manual";
   // Manual compactions (via /compact) can take longer on very large contexts.
   // Keep a tight safety ceiling for overflow/automatic compaction.
-  const safetyTimeoutMs = trigger === "manual" ? 900_000 : EMBEDDED_COMPACTION_TIMEOUT_MS;
+  const safetyTimeoutMs =
+    trigger === "manual"
+      ? resolveManualCompactionTimeoutMs(params.config)
+      : EMBEDDED_COMPACTION_TIMEOUT_MS;
   const attempt = params.attempt ?? 1;
   const maxAttempts = params.maxAttempts ?? 1;
   const runId = params.runId ?? params.sessionId;
@@ -649,7 +662,18 @@ export async function compactEmbeddedPiSessionDirect(
         }
 
         const diagEnabled = log.isEnabled("debug");
-        const preMetrics = diagEnabled ? summarizeCompactionMessages(session.messages) : undefined;
+        const shouldCollectMetrics = diagEnabled || trigger === "manual";
+        const preMetrics = shouldCollectMetrics
+          ? summarizeCompactionMessages(session.messages)
+          : undefined;
+        if (trigger === "manual" && preMetrics) {
+          log.info(
+            `[compaction] manual start runId=${runId} sessionKey=${params.sessionKey ?? params.sessionId} ` +
+              `diagId=${diagId} provider=${provider}/${modelId} timeoutMs=${safetyTimeoutMs} ` +
+              `pre.messages=${preMetrics.messages} pre.historyTextChars=${preMetrics.historyTextChars} ` +
+              `pre.toolResultChars=${preMetrics.toolResultChars} pre.estTokens=${preMetrics.estTokens ?? "unknown"}`,
+          );
+        }
         if (diagEnabled && preMetrics) {
           log.debug(
             `[compaction-diag] start runId=${runId} sessionKey=${params.sessionKey ?? params.sessionId} ` +
@@ -702,7 +726,18 @@ export async function compactEmbeddedPiSessionDirect(
             });
         }
 
-        const postMetrics = diagEnabled ? summarizeCompactionMessages(session.messages) : undefined;
+        const postMetrics = shouldCollectMetrics
+          ? summarizeCompactionMessages(session.messages)
+          : undefined;
+        if (trigger === "manual" && preMetrics && postMetrics) {
+          log.info(
+            `[compaction] manual end runId=${runId} sessionKey=${params.sessionKey ?? params.sessionId} ` +
+              `diagId=${diagId} provider=${provider}/${modelId} outcome=compacted ` +
+              `durationMs=${Date.now() - compactStartedAt} ` +
+              `post.messages=${postMetrics.messages} post.historyTextChars=${postMetrics.historyTextChars} ` +
+              `post.toolResultChars=${postMetrics.toolResultChars} post.estTokens=${postMetrics.estTokens ?? "unknown"}`,
+          );
+        }
         if (diagEnabled && preMetrics && postMetrics) {
           log.debug(
             `[compaction-diag] end runId=${runId} sessionKey=${params.sessionKey ?? params.sessionId} ` +
