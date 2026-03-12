@@ -260,6 +260,12 @@ ${pinnedBlock}`;
     }
 
     try {
+      const startedAt = Date.now();
+      log.info(
+        `compaction summary start: tokensBefore=${preparation.tokensBefore ?? "?"} firstKeptEntryId=${preparation.firstKeptEntryId} ` +
+          `splitTurn=${preparation.isSplitTurn} v2=${Boolean(runtime?.compactionV2?.enabled)}`,
+      );
+
       const modelContextWindow = resolveContextWindowTokens(model);
       const contextWindowTokens = runtime?.contextWindowTokens ?? modelContextWindow;
       const turnPrefixMessages = preparation.turnPrefixMessages ?? [];
@@ -431,6 +437,11 @@ ${pinnedBlock}`;
       if (workspaceContext) {
         summary += workspaceContext;
       }
+
+      log.info(
+        `compaction summary end: durationMs=${Date.now() - startedAt} tokensBefore=${preparation.tokensBefore ?? "?"} ` +
+          `firstKeptEntryId=${preparation.firstKeptEntryId} v2=${Boolean(v2?.enabled)}`,
+      );
 
       return {
         compaction: {

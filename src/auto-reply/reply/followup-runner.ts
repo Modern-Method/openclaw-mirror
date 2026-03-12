@@ -4,6 +4,7 @@ import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
+import { deriveSessionTotalTokens } from "../../agents/usage.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
@@ -14,6 +15,7 @@ import type { OriginatingChannelType } from "../templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveRunAuthProfile } from "./agent-runner-utils.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import {
   resolveOriginAccountId,
   resolveOriginMessageProvider,
@@ -29,7 +31,6 @@ import {
 import { resolveReplyToMode } from "./reply-threading.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
-import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
@@ -305,14 +306,36 @@ export function createFollowupRunner(params: {
           lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
           contextTokensUsed,
         });
-        if (typeof count === "number" && queued.run.config?.agents?.defaults?.compaction?.v2?.enabled) {
+        if (
+          typeof count === "number" &&
+          queued.run.config?.agents?.defaults?.compaction?.v2?.enabled
+        ) {
+          const tokensAfterCompaction = runResult.meta?.agentMeta?.lastCallUsage
+            ? deriveSessionTotalTokens({
+                usage: runResult.meta.agentMeta.lastCallUsage,
+                contextTokens: contextTokensUsed,
+              })
+            : undefined;
+
+          const checkpointPayload = [
+            "Auto-compaction completed.",
+            "- trigger: auto",
+            `- runId: ${runId}`,
+            typeof count === "number" ? `- compactionCount: ${count}` : "",
+            typeof tokensAfterCompaction === "number"
+              ? `- tokensAfter: ${tokensAfterCompaction}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n");
+
           await appendCompactionCheckpoint({
             workspaceDir: queued.run.workspaceDir,
             cfg: queued.run.config,
             idempotencyKey: `${queued.run.sessionId}:${count}:compaction`,
             sessionId: queued.run.sessionId,
             kind: "compaction",
-            payload: "Auto-compaction completed",
+            payload: checkpointPayload,
           });
         }
         if (queued.run.verboseLevel && queued.run.verboseLevel !== "off") {

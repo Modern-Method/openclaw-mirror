@@ -4,7 +4,7 @@ import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { resolveModelAuthMode } from "../../agents/model-auth.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { queueEmbeddedPiMessage } from "../../agents/pi-embedded.js";
-import { hasNonzeroUsage } from "../../agents/usage.js";
+import { deriveSessionTotalTokens, hasNonzeroUsage } from "../../agents/usage.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveSessionFilePath,
@@ -703,13 +703,32 @@ export async function runReplyAgent(params: {
         typeof count === "number" &&
         followupRun.run.config?.agents?.defaults?.compaction?.v2?.enabled
       ) {
+        const tokensAfterCompaction = runResult.meta?.agentMeta?.lastCallUsage
+          ? deriveSessionTotalTokens({
+              usage: runResult.meta.agentMeta.lastCallUsage,
+              contextTokens: contextTokensUsed,
+            })
+          : undefined;
+
+        const checkpointPayload = [
+          "Auto-compaction completed.",
+          "- trigger: auto",
+          `- runId: ${runId}`,
+          typeof count === "number" ? `- compactionCount: ${count}` : "",
+          typeof tokensAfterCompaction === "number"
+            ? `- tokensAfter: ${tokensAfterCompaction}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
         await appendCompactionCheckpoint({
           workspaceDir: followupRun.run.workspaceDir,
           cfg: followupRun.run.config,
           idempotencyKey: `${followupRun.run.sessionId}:${count}:compaction`,
           sessionId: followupRun.run.sessionId,
           kind: "compaction",
-          payload: "Auto-compaction completed",
+          payload: checkpointPayload,
         });
       }
       if (verboseEnabled) {

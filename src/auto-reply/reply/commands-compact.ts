@@ -1,4 +1,8 @@
 import {
+  formatPinnedFactsBlock,
+  loadPinnedFacts,
+} from "../../agents/compaction-v2/pinned-facts.js";
+import {
   abortEmbeddedPiRun,
   compactEmbeddedPiSession,
   isEmbeddedPiRunActive,
@@ -14,10 +18,9 @@ import { logVerbose } from "../../globals.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { formatContextUsageShort, formatTokenCount } from "../status.js";
 import type { CommandHandler } from "./commands-types.js";
+import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { incrementCompactionCount } from "./session-updates.js";
-import { appendCompactionCheckpoint } from "./compaction-checkpoints.js";
-import { formatPinnedFactsBlock, loadPinnedFacts } from "../../agents/compaction-v2/pinned-facts.js";
 
 function extractCompactInstructions(params: {
   rawBody?: string;
@@ -78,10 +81,14 @@ export const handleCompactCommand: CommandHandler = async (params) => {
     isGroup: params.isGroup,
   });
   const pinnedFacts = params.cfg?.agents?.defaults?.compaction?.v2?.enabled
-    ? await loadPinnedFacts({ workspaceDir: params.workspaceDir, pinnedFactsPath: params.cfg?.agents?.defaults?.compaction?.v2?.pinnedFactsPath })
+    ? await loadPinnedFacts({
+        workspaceDir: params.workspaceDir,
+        pinnedFactsPath: params.cfg?.agents?.defaults?.compaction?.v2?.pinnedFactsPath,
+      })
     : null;
   const pinnedBlock = formatPinnedFactsBlock(pinnedFacts);
-  const effectiveInstructions = [customInstructions, pinnedBlock].filter(Boolean).join("\n\n") || undefined;
+  const effectiveInstructions =
+    [customInstructions, pinnedBlock].filter(Boolean).join("\n\n") || undefined;
 
   const result = await compactEmbeddedPiSession({
     sessionId,
@@ -136,13 +143,30 @@ export const handleCompactCommand: CommandHandler = async (params) => {
       tokensAfter: result.result?.tokensAfter,
     });
     if (params.cfg?.agents?.defaults?.compaction?.v2?.enabled && nextCount != null) {
+      const summary = result.result?.summary ?? "";
+      const tokensBefore = result.result?.tokensBefore;
+      const tokensAfter = result.result?.tokensAfter;
+      const reason = result.reason?.trim();
+
+      const checkpointPayload = [
+        "Manual compaction completed.",
+        "- trigger: manual",
+        typeof tokensBefore === "number" ? `- tokensBefore: ${formatTokenCount(tokensBefore)}` : "",
+        typeof tokensAfter === "number" ? `- tokensAfter: ${formatTokenCount(tokensAfter)}` : "",
+        reason ? `- reason: ${reason}` : "",
+        "",
+        summary,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
       await appendCompactionCheckpoint({
         workspaceDir: params.workspaceDir,
         cfg: params.cfg,
         idempotencyKey: `${sessionId}:${nextCount}:compaction`,
         sessionId,
         kind: "compaction",
-        payload: result.result?.summary ?? "",
+        payload: checkpointPayload,
       });
     }
   }
