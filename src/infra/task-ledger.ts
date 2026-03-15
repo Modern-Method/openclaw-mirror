@@ -13,7 +13,19 @@ export const AGENT_ACTIVITY_STATUSES = ["idle", "running", "waiting", "blocked"]
 const DEFAULT_BUS_TOPIC = "shared.task.ledger";
 const DEFAULT_SOURCE = "openclaw";
 const DEFAULT_RECENT_EVENT_LIMIT = 200;
+const DEFAULT_IDEMPOTENCY_WINDOW_MS = 10_000;
 const taskLedgerLock = createAsyncLock();
+
+type TaskLedgerTaskPatch = Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">> & {
+  title?: string;
+};
+
+type MaterializedLedgerState = {
+  tasks: Map<string, TaskLedgerTask>;
+  agents: Map<string, TaskLedgerAgentActivity>;
+  appliedRecords: TaskLedgerRecord[];
+  lastRecordByEntity: Map<string, TaskLedgerRecord>;
+};
 
 export type TaskState = (typeof TASK_STATES)[number];
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
@@ -79,6 +91,7 @@ export type TaskLedgerTaskRecord = {
   fromState?: TaskState;
   toState?: TaskState;
   task?: Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">>;
+  idempotencyKey?: string;
 };
 
 export type TaskLedgerAgentRecord = {
@@ -95,6 +108,7 @@ export type TaskLedgerAgentRecord = {
   sessionKey?: string;
   summary: string;
   metadata: Record<string, unknown>;
+  idempotencyKey?: string;
 };
 
 export type TaskLedgerRecord = TaskLedgerTaskRecord | TaskLedgerAgentRecord;
@@ -136,6 +150,7 @@ export type TaskLedgerTaskUpsertInput = {
   summary?: string;
   actor?: Partial<TaskLedgerActor>;
   ts?: string;
+  idempotencyKey?: string;
 };
 
 export type TaskLedgerTaskTransitionInput = {
@@ -146,7 +161,8 @@ export type TaskLedgerTaskTransitionInput = {
   summary?: string;
   actor?: Partial<TaskLedgerActor>;
   ts?: string;
-  task?: Partial<Omit<TaskLedgerTask, "id" | "state" | "lastEventAt">> & { title?: string };
+  task?: TaskLedgerTaskPatch;
+  idempotencyKey?: string;
 };
 
 export type TaskLedgerTaskNoteInput = {
@@ -157,7 +173,8 @@ export type TaskLedgerTaskNoteInput = {
   actor?: Partial<TaskLedgerActor>;
   ts?: string;
   state?: TaskState;
-  task?: Partial<Omit<TaskLedgerTask, "id" | "state" | "lastEventAt">> & { title?: string };
+  task?: TaskLedgerTaskPatch;
+  idempotencyKey?: string;
 };
 
 export type TaskLedgerAgentHeartbeatInput = {
@@ -174,6 +191,7 @@ export type TaskLedgerAgentHeartbeatInput = {
     metadata?: Record<string, unknown>;
   };
   ts?: string;
+  idempotencyKey?: string;
 };
 
 export type TaskLedgerPublishInput =
@@ -215,6 +233,18 @@ function normalizeTimestamp(value?: string): string {
   return parsed.toISOString();
 }
 
+function normalizePersistedTimestamp(value: unknown): string | null {
+  const trimmed = trimToUndefined(value);
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.toISOString();
+}
+
 function isTaskState(value: unknown): value is TaskState {
   return typeof value === "string" && (TASK_STATES as readonly string[]).includes(value);
 }
@@ -246,6 +276,60 @@ function normalizeMetadata(value: unknown): Record<string, unknown> {
     return {};
   }
   return { ...(value as Record<string, unknown>) };
+}
+
+function hasInvalidLedgerIdCharacter(value: string): boolean {
+  for (const char of value) {
+    if (/\s/u.test(char)) {
+      return true;
+    }
+    const codePoint = char.codePointAt(0) ?? 0;
+    if (codePoint <= 0x1f || codePoint === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeLedgerId(value: unknown, label: string): string {
+  const trimmed = trimToUndefined(value);
+  if (!trimmed) {
+    throw new Error(`${label} required`);
+  }
+  if (hasInvalidLedgerIdCharacter(trimmed)) {
+    throw new Error(`${label} must not contain whitespace or control characters`);
+  }
+  return trimmed;
+}
+
+function normalizePersistedLedgerId(value: unknown): string | null {
+  try {
+    return normalizeLedgerId(value, "ledger id");
+  } catch {
+    return null;
+  }
+}
+
+function normalizeIdempotencyKey(value: unknown): string | undefined {
+  return trimToUndefined(value);
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stableValue(entry));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .toSorted(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, stableValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(stableValue(value));
 }
 
 function resolveTaskLedgerPaths(stateDir = resolveStateDir()) {
@@ -285,7 +369,7 @@ function defaultTaskRecord(params: {
 
 function mergeTaskRecord(
   current: TaskLedgerTask | undefined,
-  patch: Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">> & { title?: string },
+  patch: TaskLedgerTaskPatch,
   ts: string,
   fallbackTitle?: string,
 ): TaskLedgerTask {
@@ -420,108 +504,137 @@ function applyRecordToMaps(params: {
   });
 }
 
+function getRecordEntityKey(record: TaskLedgerRecord): string {
+  return record.entity === "task" ? `task:${record.taskId}` : `agent:${record.agentId}`;
+}
+
+function getRecordDedupSignature(record: TaskLedgerRecord): string {
+  if (record.entity === "task") {
+    return stableStringify({
+      entity: record.entity,
+      kind: record.kind,
+      taskId: record.taskId,
+      summary: record.summary,
+      actor: record.actor,
+      toState: record.toState,
+      task: record.task ?? {},
+    });
+  }
+  return stableStringify({
+    entity: record.entity,
+    kind: record.kind,
+    agentId: record.agentId,
+    name: record.name,
+    status: record.status,
+    lane: record.lane,
+    currentTaskId: record.currentTaskId,
+    sessionKey: record.sessionKey,
+    summary: record.summary,
+    metadata: record.metadata,
+  });
+}
+
+function isIdempotentDuplicateRecord(
+  record: TaskLedgerRecord,
+  previous?: TaskLedgerRecord,
+): boolean {
+  if (!previous || getRecordEntityKey(previous) !== getRecordEntityKey(record)) {
+    return false;
+  }
+  if (
+    record.idempotencyKey &&
+    previous.idempotencyKey &&
+    record.idempotencyKey === previous.idempotencyKey
+  ) {
+    return true;
+  }
+  if (getRecordDedupSignature(record) !== getRecordDedupSignature(previous)) {
+    return false;
+  }
+  const deltaMs = Math.abs(Date.parse(record.ts) - Date.parse(previous.ts));
+  return Number.isFinite(deltaMs) && deltaMs <= DEFAULT_IDEMPOTENCY_WINDOW_MS;
+}
+
+function materializeLedgerState(records: TaskLedgerRecord[]): MaterializedLedgerState {
+  const tasks = new Map<string, TaskLedgerTask>();
+  const agents = new Map<string, TaskLedgerAgentActivity>();
+  const appliedRecords: TaskLedgerRecord[] = [];
+  const lastRecordByEntity = new Map<string, TaskLedgerRecord>();
+
+  for (const record of records) {
+    try {
+      applyRecordToMaps({ record, tasks, agents });
+      appliedRecords.push(record);
+      lastRecordByEntity.set(getRecordEntityKey(record), record);
+    } catch {
+      // Ignore malformed persisted records so the append-only log stays authoritative
+      // and snapshot rebuilds can recover from bad out-of-band lines.
+    }
+  }
+
+  return { tasks, agents, appliedRecords, lastRecordByEntity };
+}
+
 function createSnapshotFromRecords(params: {
   stateDir: string;
   records: TaskLedgerRecord[];
   recentEventLimit?: number;
 }): TaskLedgerSnapshot {
-  const tasks = new Map<string, TaskLedgerTask>();
-  const agents = new Map<string, TaskLedgerAgentActivity>();
-  for (const record of params.records) {
-    applyRecordToMaps({ record, tasks, agents });
-  }
+  const materialized = materializeLedgerState(params.records);
   const recentLimit =
     typeof params.recentEventLimit === "number" && params.recentEventLimit > 0
       ? Math.floor(params.recentEventLimit)
       : DEFAULT_RECENT_EVENT_LIMIT;
-  const recentEvents = params.records.slice(-recentLimit);
+  const recentEvents = materialized.appliedRecords.slice(-recentLimit);
   return {
     schema: TASK_LEDGER_SNAPSHOT_SCHEMA,
     generatedAt: new Date().toISOString(),
-    lastEventId: params.records[params.records.length - 1]?.id,
+    lastEventId: materialized.appliedRecords[materialized.appliedRecords.length - 1]?.id,
     paths: resolveTaskLedgerPaths(params.stateDir),
-    tasks: sortTasks(tasks.values()),
-    agents: sortAgents(agents.values()),
+    tasks: sortTasks(materialized.tasks.values()),
+    agents: sortAgents(materialized.agents.values()),
     recentEvents,
   };
 }
 
-export async function readTaskLedgerEvents(
-  options: ReadTaskLedgerEventsOptions = {},
-): Promise<TaskLedgerRecord[]> {
-  const stateDir = options.stateDir ?? resolveStateDir();
-  const { eventsFile } = resolveTaskLedgerPaths(stateDir);
-  let raw = "";
-  try {
-    raw = await fs.readFile(eventsFile, "utf8");
-  } catch {
-    return [];
+function withRecentEventLimit(
+  snapshot: TaskLedgerSnapshot,
+  recentEventLimit?: number,
+): TaskLedgerSnapshot {
+  if (typeof recentEventLimit !== "number" || recentEventLimit <= 0) {
+    return snapshot;
   }
-  const records = raw
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const parsed = JSON.parse(line) as TaskLedgerRecord;
-        return parsed?.schema === TASK_LEDGER_SCHEMA ? [parsed] : [];
-      } catch {
-        return [];
-      }
-    })
-    .filter((record) => {
-      if (options.taskId && record.entity === "task" && record.taskId !== options.taskId) {
-        return false;
-      }
-      if (options.taskId && record.entity !== "task") {
-        return false;
-      }
-      if (options.agentId && record.entity === "agent" && record.agentId !== options.agentId) {
-        return false;
-      }
-      if (options.agentId && record.entity !== "agent") {
-        return false;
-      }
-      return true;
-    });
-  const limit =
-    typeof options.limit === "number" && options.limit > 0 ? Math.floor(options.limit) : undefined;
-  return limit ? records.slice(-limit) : records;
+  return {
+    ...snapshot,
+    recentEvents: snapshot.recentEvents.slice(-Math.floor(recentEventLimit)),
+  };
 }
 
-export async function readTaskLedgerSnapshot(options?: {
-  stateDir?: string;
-  recentEventLimit?: number;
-}): Promise<TaskLedgerSnapshot> {
-  const stateDir = options?.stateDir ?? resolveStateDir();
-  const paths = resolveTaskLedgerPaths(stateDir);
-  const cached = await readJsonFile<TaskLedgerSnapshot>(paths.snapshotFile);
-  if (cached?.schema === TASK_LEDGER_SNAPSHOT_SCHEMA) {
-    if (typeof options?.recentEventLimit === "number" && options.recentEventLimit > 0) {
-      return {
-        ...cached,
-        paths,
-        recentEvents: cached.recentEvents.slice(-Math.floor(options.recentEventLimit)),
-      };
-    }
-    return { ...cached, paths };
+function shouldRewriteSnapshot(
+  cached: TaskLedgerSnapshot | null,
+  canonical: TaskLedgerSnapshot,
+): boolean {
+  if (cached?.schema !== TASK_LEDGER_SNAPSHOT_SCHEMA) {
+    return true;
   }
-  const records = await readTaskLedgerEvents({ stateDir });
-  const snapshot = createSnapshotFromRecords({
-    stateDir,
-    records,
-    recentEventLimit: options?.recentEventLimit,
+  if (cached.lastEventId !== canonical.lastEventId) {
+    return true;
+  }
+  if (!canonical.lastEventId) {
+    return cached.tasks.length > 0 || cached.agents.length > 0 || cached.recentEvents.length > 0;
+  }
+  return false;
+}
+
+async function writeSnapshotFile(snapshot: TaskLedgerSnapshot) {
+  await writeJsonAtomic(snapshot.paths.snapshotFile, snapshot, {
+    mode: 0o600,
+    trailingNewline: true,
   });
-  if (records.length > 0) {
-    await writeJsonAtomic(paths.snapshotFile, snapshot, { mode: 0o600, trailingNewline: true });
-  }
-  return snapshot;
 }
 
-function normalizeTaskPatch(
-  patch: (Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">> & { title?: string }) | undefined,
-): Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">> & { title?: string } {
-  if (!patch) {
+function normalizeTaskPatch(patch: TaskLedgerTaskPatch | undefined): TaskLedgerTaskPatch {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
     return {};
   }
   return {
@@ -542,18 +655,181 @@ function normalizeTaskPatch(
   };
 }
 
+function parsePersistedTaskRecord(value: Record<string, unknown>): TaskLedgerTaskRecord | null {
+  const id = normalizePersistedLedgerId(value.id);
+  const ts = normalizePersistedTimestamp(value.ts);
+  const taskId = normalizePersistedLedgerId(value.taskId);
+  if (!id || !ts || !taskId) {
+    return null;
+  }
+  const kind = value.kind;
+  if (
+    kind !== "created" &&
+    kind !== "started" &&
+    kind !== "state_changed" &&
+    kind !== "qa" &&
+    kind !== "blocked" &&
+    kind !== "note" &&
+    kind !== "sync"
+  ) {
+    return null;
+  }
+  const task = normalizeTaskPatch(
+    value.task && typeof value.task === "object" && !Array.isArray(value.task)
+      ? (value.task as TaskLedgerTaskPatch)
+      : undefined,
+  );
+  return {
+    schema: TASK_LEDGER_SCHEMA,
+    id,
+    ts,
+    entity: "task",
+    kind,
+    taskId,
+    summary: trimToUndefined(value.summary) ?? `${kind} for ${taskId}`,
+    actor: normalizeActor(
+      value.actor && typeof value.actor === "object" && !Array.isArray(value.actor)
+        ? (value.actor as Partial<TaskLedgerActor>)
+        : undefined,
+    ),
+    ...(isTaskState(value.fromState) ? { fromState: value.fromState } : {}),
+    ...(isTaskState(value.toState) ? { toState: value.toState } : {}),
+    ...(Object.keys(task).length > 0 ? { task } : {}),
+    ...(normalizeIdempotencyKey(value.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(value.idempotencyKey) }
+      : {}),
+  };
+}
+
+function parsePersistedAgentRecord(value: Record<string, unknown>): TaskLedgerAgentRecord | null {
+  const id = normalizePersistedLedgerId(value.id);
+  const ts = normalizePersistedTimestamp(value.ts);
+  const agentId = normalizePersistedLedgerId(value.agentId);
+  if (!id || !ts || !agentId || value.kind !== "heartbeat") {
+    return null;
+  }
+  const status = isAgentActivityStatus(value.status) ? value.status : null;
+  if (!status) {
+    return null;
+  }
+  return {
+    schema: TASK_LEDGER_SCHEMA,
+    id,
+    ts,
+    entity: "agent",
+    kind: "heartbeat",
+    agentId,
+    ...(trimToUndefined(value.name) ? { name: trimToUndefined(value.name) } : {}),
+    status,
+    ...(trimToUndefined(value.lane) ? { lane: trimToUndefined(value.lane) } : {}),
+    ...(trimToUndefined(value.currentTaskId)
+      ? { currentTaskId: trimToUndefined(value.currentTaskId) }
+      : {}),
+    ...(trimToUndefined(value.sessionKey) ? { sessionKey: trimToUndefined(value.sessionKey) } : {}),
+    summary: trimToUndefined(value.summary) ?? "Heartbeat",
+    metadata: normalizeMetadata(value.metadata),
+    ...(normalizeIdempotencyKey(value.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(value.idempotencyKey) }
+      : {}),
+  };
+}
+
+function parsePersistedTaskLedgerRecord(value: unknown): TaskLedgerRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.schema !== TASK_LEDGER_SCHEMA) {
+    return null;
+  }
+  if (record.entity === "task") {
+    return parsePersistedTaskRecord(record);
+  }
+  if (record.entity === "agent") {
+    return parsePersistedAgentRecord(record);
+  }
+  return null;
+}
+
+async function readAllTaskLedgerRecords(stateDir: string): Promise<TaskLedgerRecord[]> {
+  const { eventsFile } = resolveTaskLedgerPaths(stateDir);
+  let raw = "";
+  try {
+    raw = await fs.readFile(eventsFile, "utf8");
+  } catch {
+    return [];
+  }
+  return raw
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        const record = parsePersistedTaskLedgerRecord(parsed);
+        return record ? [record] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+export async function readTaskLedgerEvents(
+  options: ReadTaskLedgerEventsOptions = {},
+): Promise<TaskLedgerRecord[]> {
+  const stateDir = options.stateDir ?? resolveStateDir();
+  const records = (await readAllTaskLedgerRecords(stateDir)).filter((record) => {
+    if (options.taskId && record.entity === "task" && record.taskId !== options.taskId) {
+      return false;
+    }
+    if (options.taskId && record.entity !== "task") {
+      return false;
+    }
+    if (options.agentId && record.entity === "agent" && record.agentId !== options.agentId) {
+      return false;
+    }
+    if (options.agentId && record.entity !== "agent") {
+      return false;
+    }
+    return true;
+  });
+  const limit =
+    typeof options.limit === "number" && options.limit > 0 ? Math.floor(options.limit) : undefined;
+  return limit ? records.slice(-limit) : records;
+}
+
+export async function readTaskLedgerSnapshot(options?: {
+  stateDir?: string;
+  recentEventLimit?: number;
+}): Promise<TaskLedgerSnapshot> {
+  const stateDir = options?.stateDir ?? resolveStateDir();
+  const paths = resolveTaskLedgerPaths(stateDir);
+  const records = await readAllTaskLedgerRecords(stateDir);
+  const canonical = createSnapshotFromRecords({
+    stateDir,
+    records,
+    recentEventLimit: DEFAULT_RECENT_EVENT_LIMIT,
+  });
+  const cached = await readJsonFile<TaskLedgerSnapshot>(paths.snapshotFile);
+  if (shouldRewriteSnapshot(cached, canonical)) {
+    await writeSnapshotFile(canonical);
+  }
+  return withRecentEventLimit(canonical, options?.recentEventLimit);
+}
+
 function normalizeTaskUpsertRecord(
   input: TaskLedgerTaskUpsertInput,
   existing: TaskLedgerTask | undefined,
 ): TaskLedgerTaskRecord {
   const ts = normalizeTimestamp(input.ts);
+  const taskId = normalizeLedgerId(input.task.id, "task id");
   const patch = normalizeTaskPatch(input.task);
   const title = trimToUndefined(input.task.title) ?? existing?.title;
   if (!title) {
-    throw new Error(`task title required for ${input.task.id}`);
+    throw new Error(`task title required for ${taskId}`);
   }
   const next = mergeTaskRecord(existing, patch, ts, title);
-  next.id = input.task.id;
+  next.id = taskId;
   const created = !existing;
   return {
     schema: TASK_LEDGER_SCHEMA,
@@ -561,7 +837,7 @@ function normalizeTaskUpsertRecord(
     ts,
     entity: "task",
     kind: created ? "created" : "sync",
-    taskId: input.task.id,
+    taskId,
     summary:
       trimToUndefined(input.summary) ??
       (created ? `Created task ${next.title}` : `Synced task ${next.title}`),
@@ -584,6 +860,9 @@ function normalizeTaskUpsertRecord(
       ...(next.worktree ? { worktree: next.worktree } : {}),
       metadata: next.metadata,
     },
+    ...(normalizeIdempotencyKey(input.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
+      : {}),
   };
 }
 
@@ -602,20 +881,21 @@ function normalizeTaskTransitionRecord(
   existing: TaskLedgerTask | undefined,
 ): TaskLedgerTaskRecord {
   const ts = normalizeTimestamp(input.ts);
+  const taskId = normalizeLedgerId(input.taskId, "task id");
   const patch = normalizeTaskPatch(input.task);
   const title = trimToUndefined(input.task?.title) ?? existing?.title;
   if (!existing && !title) {
-    throw new Error(`task ${input.taskId} not found and no title provided`);
+    throw new Error(`task ${taskId} not found and no title provided`);
   }
   const next = mergeTaskRecord(existing, { ...patch, state: input.state }, ts, title);
-  next.id = input.taskId;
+  next.id = taskId;
   return {
     schema: TASK_LEDGER_SCHEMA,
     id: randomUUID(),
     ts,
     entity: "task",
     kind: deriveTransitionEventKind(input.state),
-    taskId: input.taskId,
+    taskId,
     summary:
       trimToUndefined(input.summary) ??
       `Moved ${next.title} to ${input.state.replaceAll("_", " ")}`,
@@ -628,6 +908,9 @@ function normalizeTaskTransitionRecord(
         ? { blockedReason: trimToUndefined(input.summary) }
         : {}),
     },
+    ...(normalizeIdempotencyKey(input.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
+      : {}),
   };
 }
 
@@ -636,10 +919,11 @@ function normalizeTaskNoteRecord(
   existing: TaskLedgerTask | undefined,
 ): TaskLedgerTaskRecord {
   const ts = normalizeTimestamp(input.ts);
+  const taskId = normalizeLedgerId(input.taskId, "task id");
   const patch = normalizeTaskPatch(input.task);
   const title = trimToUndefined(input.task?.title) ?? existing?.title;
   if (!existing && !title) {
-    throw new Error(`task ${input.taskId} not found and no title provided`);
+    throw new Error(`task ${taskId} not found and no title provided`);
   }
   const toState = isTaskState(input.state) ? input.state : undefined;
   return {
@@ -648,7 +932,7 @@ function normalizeTaskNoteRecord(
     ts,
     entity: "task",
     kind: input.kind,
-    taskId: input.taskId,
+    taskId,
     summary: trimToUndefined(input.summary) ?? `${input.kind} for ${title}`,
     actor: normalizeActor(input.actor),
     ...(existing?.state && toState ? { fromState: existing.state } : {}),
@@ -660,18 +944,22 @@ function normalizeTaskNoteRecord(
         ? { blockedReason: trimToUndefined(input.summary) }
         : {}),
     },
+    ...(normalizeIdempotencyKey(input.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
+      : {}),
   };
 }
 
 function normalizeAgentRecord(input: TaskLedgerAgentHeartbeatInput): TaskLedgerAgentRecord {
   const ts = normalizeTimestamp(input.ts);
+  const agentId = normalizeLedgerId(input.agent.id, "agent id");
   return {
     schema: TASK_LEDGER_SCHEMA,
     id: randomUUID(),
     ts,
     entity: "agent",
     kind: "heartbeat",
-    agentId: input.agent.id,
+    agentId,
     ...(trimToUndefined(input.agent.name) ? { name: trimToUndefined(input.agent.name) } : {}),
     status: isAgentActivityStatus(input.agent.status) ? input.agent.status : "idle",
     ...(trimToUndefined(input.agent.lane) ? { lane: trimToUndefined(input.agent.lane) } : {}),
@@ -683,6 +971,9 @@ function normalizeAgentRecord(input: TaskLedgerAgentHeartbeatInput): TaskLedgerA
       : {}),
     summary: trimToUndefined(input.agent.summary) ?? "Heartbeat",
     metadata: normalizeMetadata(input.agent.metadata),
+    ...(normalizeIdempotencyKey(input.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
+      : {}),
   };
 }
 
@@ -691,15 +982,25 @@ function normalizePublishRecord(
   tasks: Map<string, TaskLedgerTask>,
 ): TaskLedgerRecord {
   if (input.entity === "task" && input.kind === "upsert") {
-    return normalizeTaskUpsertRecord(input, tasks.get(input.task.id));
+    const taskId = normalizeLedgerId(input.task.id, "task id");
+    return normalizeTaskUpsertRecord(input, tasks.get(taskId));
   }
   if (input.entity === "task" && input.kind === "transition") {
-    return normalizeTaskTransitionRecord(input, tasks.get(input.taskId));
+    const taskId = normalizeLedgerId(input.taskId, "task id");
+    return normalizeTaskTransitionRecord(input, tasks.get(taskId));
   }
   if (input.entity === "task") {
-    return normalizeTaskNoteRecord(input, tasks.get(input.taskId));
+    const taskId = normalizeLedgerId(input.taskId, "task id");
+    return normalizeTaskNoteRecord(input, tasks.get(taskId));
   }
-  return normalizeAgentRecord(input);
+  const agentId = normalizeLedgerId(input.agent.id, "agent id");
+  return normalizeAgentRecord({
+    ...input,
+    agent: {
+      ...input.agent,
+      id: agentId,
+    },
+  });
 }
 
 export async function publishTaskLedgerEvents(params: {
@@ -718,42 +1019,45 @@ export async function publishTaskLedgerEvents(params: {
       }),
     };
   }
+
   return await taskLedgerLock(async () => {
-    const snapshot = await readTaskLedgerSnapshot({
+    const existingRecords = await readAllTaskLedgerRecords(stateDir);
+    const materialized = materializeLedgerState(existingRecords);
+    const accepted: TaskLedgerRecord[] = [];
+
+    for (const event of params.events) {
+      const record = normalizePublishRecord(event, materialized.tasks);
+      const entityKey = getRecordEntityKey(record);
+      const previous = materialized.lastRecordByEntity.get(entityKey);
+      if (isIdempotentDuplicateRecord(record, previous)) {
+        continue;
+      }
+      applyRecordToMaps({
+        record,
+        tasks: materialized.tasks,
+        agents: materialized.agents,
+      });
+      materialized.lastRecordByEntity.set(entityKey, record);
+      accepted.push(record);
+    }
+
+    if (accepted.length > 0) {
+      await appendLedgerEvents(stateDir, accepted);
+    }
+
+    const canonicalRecords =
+      accepted.length > 0 ? await readAllTaskLedgerRecords(stateDir) : existingRecords;
+    const canonicalSnapshot = createSnapshotFromRecords({
       stateDir,
-      recentEventLimit: params.recentEventLimit,
+      records: canonicalRecords,
+      recentEventLimit: DEFAULT_RECENT_EVENT_LIMIT,
     });
-    const tasks = new Map(snapshot.tasks.map((task) => [task.id, task]));
-    const agents = new Map(snapshot.agents.map((agent) => [agent.id, agent]));
-    const recentEvents = [...snapshot.recentEvents];
-    const normalized = params.events.map((event) => {
-      const record = normalizePublishRecord(event, tasks);
-      applyRecordToMaps({ record, tasks, agents });
-      recentEvents.push(record);
-      return record;
-    });
-    await appendLedgerEvents(stateDir, normalized);
-    const persistedRecentLimit = Math.max(
-      DEFAULT_RECENT_EVENT_LIMIT,
-      params.recentEventLimit ?? DEFAULT_RECENT_EVENT_LIMIT,
-    );
-    const nextSnapshot: TaskLedgerSnapshot = {
-      schema: TASK_LEDGER_SNAPSHOT_SCHEMA,
-      generatedAt: new Date().toISOString(),
-      lastEventId: normalized[normalized.length - 1]?.id ?? snapshot.lastEventId,
-      paths: resolveTaskLedgerPaths(stateDir),
-      tasks: sortTasks(tasks.values()),
-      agents: sortAgents(agents.values()),
-      recentEvents: recentEvents.slice(-persistedRecentLimit),
-    };
-    await writeJsonAtomic(nextSnapshot.paths.snapshotFile, nextSnapshot, {
-      mode: 0o600,
-      trailingNewline: true,
-    });
+    await writeSnapshotFile(canonicalSnapshot);
+
     return {
-      accepted: normalized.length,
-      events: normalized,
-      snapshot: nextSnapshot,
+      accepted: accepted.length,
+      events: accepted,
+      snapshot: withRecentEventLimit(canonicalSnapshot, params.recentEventLimit),
     };
   });
 }

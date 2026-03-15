@@ -21,7 +21,7 @@ import {
 } from "../config/config.js";
 import { formatConfigIssueLines } from "../config/issue-format.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
-import { resolveAgentIdFromSessionKey, resolveMainSessionKey } from "../config/sessions.js";
+import { resolveMainSessionKey } from "../config/sessions.js";
 import { clearAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
 import {
   ensureControlUiAssetsBuilt,
