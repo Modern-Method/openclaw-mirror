@@ -341,6 +341,153 @@ describe("task ledger", () => {
     expect(agentEvents).toHaveLength(1);
   });
 
+  it("ignores delayed task replays with the same idempotency key after newer task events", async () => {
+    const stateDir = await createStateDir();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T05:10:00.000Z"));
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Replay-safe task", state: "todo" },
+        },
+      ],
+    });
+
+    const started = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "transition",
+          taskId: "task-1",
+          state: "in_progress",
+          summary: "Started work",
+          idempotencyKey: "task-1:start",
+        },
+      ],
+    });
+
+    vi.setSystemTime(new Date("2026-03-15T05:11:00.000Z"));
+    const qa = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "transition",
+          taskId: "task-1",
+          state: "qa",
+          summary: "Ready for QA",
+          idempotencyKey: "task-1:qa",
+        },
+      ],
+    });
+
+    vi.setSystemTime(new Date("2026-03-15T05:12:00.000Z"));
+    const replayedStart = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "transition",
+          taskId: "task-1",
+          state: "in_progress",
+          summary: "Started work",
+          idempotencyKey: "task-1:start",
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    expect(started.accepted).toBe(1);
+    expect(qa.accepted).toBe(1);
+    expect(replayedStart.accepted).toBe(0);
+    expect(taskEvents.map((event) => event.idempotencyKey)).toEqual([
+      undefined,
+      "task-1:start",
+      "task-1:qa",
+    ]);
+    expect(snapshot.tasks[0]).toMatchObject({ id: "task-1", state: "qa" });
+    expect(snapshot.recentEvents.map((event) => event.kind)).toEqual([
+      "created",
+      "state_changed",
+      "qa",
+    ]);
+  });
+
+  it("ignores non-consecutive agent idempotency-key replays when rebuilding from events.jsonl", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          idempotencyKey: "run-1:start",
+          agent: {
+            id: "forge",
+            status: "running",
+            summary: "Run started",
+            sessionKey: "main",
+            metadata: { runId: "run-1", phase: "start" },
+          },
+          ts: "2026-03-15T05:20:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          idempotencyKey: "run-1:end",
+          agent: {
+            id: "forge",
+            status: "idle",
+            summary: "Run finished",
+            sessionKey: "main",
+            metadata: { runId: "run-1", phase: "end" },
+          },
+          ts: "2026-03-15T05:21:00.000Z",
+        },
+      ],
+    });
+
+    await appendRawEvents(stateDir, [
+      {
+        schema: TASK_LEDGER_SCHEMA,
+        id: "evt-agent-replay-1",
+        ts: "2026-03-15T05:22:00.000Z",
+        entity: "agent",
+        kind: "heartbeat",
+        agentId: "forge",
+        status: "running",
+        sessionKey: "main",
+        summary: "Run started",
+        metadata: { runId: "run-1", phase: "start" },
+        idempotencyKey: "run-1:start",
+      },
+    ]);
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const rawAgentEvents = await readTaskLedgerEvents({ stateDir, agentId: "forge" });
+
+    expect(rawAgentEvents).toHaveLength(3);
+    expect(snapshot.agents[0]).toMatchObject({
+      id: "forge",
+      status: "idle",
+      summary: "Run finished",
+    });
+    expect(snapshot.recentEvents.filter((event) => event.entity === "agent")).toHaveLength(2);
+    expect(
+      snapshot.recentEvents
+        .filter((event) => event.entity === "agent")
+        .map((event) => event.idempotencyKey),
+    ).toEqual(["run-1:start", "run-1:end"]);
+  });
+
   it("rejects malformed task and agent ids", async () => {
     const stateDir = await createStateDir();
 

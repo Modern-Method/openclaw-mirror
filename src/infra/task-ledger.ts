@@ -25,6 +25,7 @@ type MaterializedLedgerState = {
   agents: Map<string, TaskLedgerAgentActivity>;
   appliedRecords: TaskLedgerRecord[];
   lastRecordByEntity: Map<string, TaskLedgerRecord>;
+  seenIdempotencyKeysByEntity: Map<string, Set<string>>;
 };
 
 export type TaskState = (typeof TASK_STATES)[number];
@@ -508,6 +509,18 @@ function getRecordEntityKey(record: TaskLedgerRecord): string {
   return record.entity === "task" ? `task:${record.taskId}` : `agent:${record.agentId}`;
 }
 
+function getSeenIdempotencyKeysForEntity(
+  seenIdempotencyKeysByEntity: Map<string, Set<string>>,
+  entityKey: string,
+): Set<string> {
+  let seen = seenIdempotencyKeysByEntity.get(entityKey);
+  if (!seen) {
+    seen = new Set<string>();
+    seenIdempotencyKeysByEntity.set(entityKey, seen);
+  }
+  return seen;
+}
+
 function getRecordDedupSignature(record: TaskLedgerRecord): string {
   if (record.entity === "task") {
     return stableStringify({
@@ -555,24 +568,74 @@ function isIdempotentDuplicateRecord(
   return Number.isFinite(deltaMs) && deltaMs <= DEFAULT_IDEMPOTENCY_WINDOW_MS;
 }
 
+function hasSeenEntityIdempotencyKey(
+  record: TaskLedgerRecord,
+  seenIdempotencyKeysByEntity: Map<string, Set<string>>,
+): boolean {
+  const idempotencyKey = normalizeIdempotencyKey(record.idempotencyKey);
+  if (!idempotencyKey) {
+    return false;
+  }
+  return getSeenIdempotencyKeysForEntity(
+    seenIdempotencyKeysByEntity,
+    getRecordEntityKey(record),
+  ).has(idempotencyKey);
+}
+
+function rememberAcceptedRecord(
+  record: TaskLedgerRecord,
+  materialized: Pick<MaterializedLedgerState, "lastRecordByEntity" | "seenIdempotencyKeysByEntity">,
+) {
+  const entityKey = getRecordEntityKey(record);
+  materialized.lastRecordByEntity.set(entityKey, record);
+  const idempotencyKey = normalizeIdempotencyKey(record.idempotencyKey);
+  if (!idempotencyKey) {
+    return;
+  }
+  getSeenIdempotencyKeysForEntity(materialized.seenIdempotencyKeysByEntity, entityKey).add(
+    idempotencyKey,
+  );
+}
+
+// Idempotency keys are scoped to the logical entity (task or agent id). First accepted record wins:
+// once a record with a given key has been accepted for that entity, later replays with the same key
+// are ignored during both publish-time appends and log re-materialization, even if newer records
+// intervened.
+function shouldSkipDuplicateRecord(
+  record: TaskLedgerRecord,
+  materialized: Pick<MaterializedLedgerState, "lastRecordByEntity" | "seenIdempotencyKeysByEntity">,
+): boolean {
+  if (hasSeenEntityIdempotencyKey(record, materialized.seenIdempotencyKeysByEntity)) {
+    return true;
+  }
+  return isIdempotentDuplicateRecord(
+    record,
+    materialized.lastRecordByEntity.get(getRecordEntityKey(record)),
+  );
+}
+
 function materializeLedgerState(records: TaskLedgerRecord[]): MaterializedLedgerState {
   const tasks = new Map<string, TaskLedgerTask>();
   const agents = new Map<string, TaskLedgerAgentActivity>();
   const appliedRecords: TaskLedgerRecord[] = [];
   const lastRecordByEntity = new Map<string, TaskLedgerRecord>();
+  const seenIdempotencyKeysByEntity = new Map<string, Set<string>>();
 
   for (const record of records) {
     try {
+      if (shouldSkipDuplicateRecord(record, { lastRecordByEntity, seenIdempotencyKeysByEntity })) {
+        continue;
+      }
       applyRecordToMaps({ record, tasks, agents });
       appliedRecords.push(record);
-      lastRecordByEntity.set(getRecordEntityKey(record), record);
+      rememberAcceptedRecord(record, { lastRecordByEntity, seenIdempotencyKeysByEntity });
     } catch {
       // Ignore malformed persisted records so the append-only log stays authoritative
       // and snapshot rebuilds can recover from bad out-of-band lines.
     }
   }
 
-  return { tasks, agents, appliedRecords, lastRecordByEntity };
+  return { tasks, agents, appliedRecords, lastRecordByEntity, seenIdempotencyKeysByEntity };
 }
 
 function createSnapshotFromRecords(params: {
@@ -1027,9 +1090,7 @@ export async function publishTaskLedgerEvents(params: {
 
     for (const event of params.events) {
       const record = normalizePublishRecord(event, materialized.tasks);
-      const entityKey = getRecordEntityKey(record);
-      const previous = materialized.lastRecordByEntity.get(entityKey);
-      if (isIdempotentDuplicateRecord(record, previous)) {
+      if (shouldSkipDuplicateRecord(record, materialized)) {
         continue;
       }
       applyRecordToMaps({
@@ -1037,7 +1098,7 @@ export async function publishTaskLedgerEvents(params: {
         tasks: materialized.tasks,
         agents: materialized.agents,
       });
-      materialized.lastRecordByEntity.set(entityKey, record);
+      rememberAcceptedRecord(record, materialized);
       accepted.push(record);
     }
 
