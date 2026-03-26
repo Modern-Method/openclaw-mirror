@@ -55,24 +55,19 @@ This hook is **disabled by default**. Enable it explicitly with `hooks.internal.
 
 ## Search Scoping
 
-The hook only runs when `channelId` is present and the sender can be scoped to either:
-
-- a canonical `resourceId` resolved from `session.identityLinks`, `channelId`, and `senderId`
-- a channel-scoped sender fallback resource id (`<channelId>:<senderId>`) when no canonical identity link exists
-- an owner canonical identity for direct-owner DMs when `senderIsOwner` is true
+The hook only runs when `channelId` is present and scope can be resolved safely.
+If `senderId` is missing, the canary recall path is skipped unless the session is explicitly marked as the owner and a canonical owner identity can be resolved from `session.identityLinks`.
 
 It sends scoped search filters in the request body:
 
 - `query`
 - `limit`
 - `agentId`
-- `resourceId` resolved from canonical identity, or the channel-scoped sender fallback when sender identity is known
-- `threadId` (session key) only for legacy/fallback paths where no `resourceId` can be derived
+- `resourceId` (canonical identity resolved from `session.identityLinks`, `channelId`, `senderId`)
 
 Client-side scope hardening is also applied before injection:
 
-- each recalled item must match requested `resourceId` when one was requested
-- when `threadId` fallback is used, each recalled item must also match requested `threadId`
+- each recalled item must match requested `resourceId`
 
 Ethos response parsing expects:
 
@@ -89,8 +84,8 @@ Injected recall is rendered as:
 - explicit instruction that recalled memories are untrusted quoted data
 - `memories` encoded as a JSON array (no markdown headings/lists)
 - delimiter collision escaping inside string fields
-- strict field whitelist per memory (`text`, `id`, `created_at`, `source`, `score`, optional `resource_id`/`thread_id`)
-  - raw `metadata`, `retrieval`, and `metadata_scores` objects are never injected
+- strict field whitelist per memory (`text`, optional `created_at`, optional `source`)
+  - raw `metadata`, `retrieval`, `metadata_scores`, record IDs, scores, and scope identifiers are never injected
 
 ## Circuit Breaker
 
@@ -103,3 +98,12 @@ To avoid repeated failing calls, the hook uses a simple fail-open breaker:
 ## Failure Mode
 
 Fail-open: if Ethos is unavailable, times out, or the circuit breaker is open, prompt build proceeds unchanged.
+
+## Observability
+
+Every recall decision also emits a safe task-ledger trace event:
+
+- `entity: "recall"`
+- `kind: "trace"`
+- includes decision fields like `ran`, `skippedReason`, scope hints, candidate/injection counts, and dependency status
+- excludes raw prompt text, raw Ethos metadata blobs, and raw prepend-context dumps

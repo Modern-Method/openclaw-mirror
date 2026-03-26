@@ -75,8 +75,6 @@ export const AgentParamsSchema = Type.Object(
   {
     message: NonEmptyString,
     agentId: Type.Optional(NonEmptyString),
-    provider: Type.Optional(Type.String()),
-    model: Type.Optional(Type.String()),
     to: Type.Optional(Type.String()),
     replyTo: Type.Optional(Type.String()),
     sessionId: Type.Optional(Type.String()),
@@ -95,6 +93,7 @@ export const AgentParamsSchema = Type.Object(
     timeout: Type.Optional(Type.Integer({ minimum: 0 })),
     bestEffortDeliver: Type.Optional(Type.Boolean()),
     lane: Type.Optional(Type.String()),
+    currentTaskId: Type.Optional(Type.String()),
     extraSystemPrompt: Type.Optional(Type.String()),
     internalEvents: Type.Optional(Type.Array(AgentInternalEventSchema)),
     inputProvenance: Type.Optional(InputProvenanceSchema),

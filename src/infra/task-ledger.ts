@@ -14,6 +14,10 @@ const DEFAULT_BUS_TOPIC = "shared.task.ledger";
 const DEFAULT_SOURCE = "openclaw";
 const DEFAULT_RECENT_EVENT_LIMIT = 200;
 const DEFAULT_IDEMPOTENCY_WINDOW_MS = 10_000;
+const RECONCILE_ACTOR_ID = "task-ledger-reconciler";
+const RECONCILE_ACTOR_NAME = "Task ledger reconciler";
+const RECONCILE_IDEMPOTENCY_PREFIX = "reconcile";
+const RECONCILE_AGENT_STALE_MS = 15 * 60_000;
 const taskLedgerLock = createAsyncLock();
 
 type TaskLedgerTaskPatch = Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">> & {
@@ -73,6 +77,8 @@ export type TaskLedgerAgentActivity = {
   status: AgentActivityStatus;
   lane?: string;
   currentTaskId?: string;
+  worktree?: string;
+  branch?: string;
   summary: string;
   sessionKey?: string;
   heartbeatAt: string;
@@ -104,15 +110,39 @@ export type TaskLedgerAgentRecord = {
   agentId: string;
   name?: string;
   status: AgentActivityStatus;
-  lane?: string;
-  currentTaskId?: string;
-  sessionKey?: string;
+  lane?: string | null;
+  currentTaskId?: string | null;
+  sessionKey?: string | null;
+  worktree?: string | null;
+  branch?: string | null;
   summary: string;
   metadata: Record<string, unknown>;
   idempotencyKey?: string;
 };
 
-export type TaskLedgerRecord = TaskLedgerTaskRecord | TaskLedgerAgentRecord;
+export type TaskLedgerRecallRecord = {
+  schema: typeof TASK_LEDGER_SCHEMA;
+  id: string;
+  ts: string;
+  entity: "recall";
+  kind: "trace";
+  sessionKey: string;
+  agentId: string;
+  ran: boolean;
+  skippedReason?: string;
+  scope?: Record<string, unknown>;
+  candidatesConsidered: number;
+  injectedCount: number;
+  injectedChars: number;
+  withheldCount?: number;
+  dependencyStatus: "ok" | "timeout" | "error" | "skipped";
+  idempotencyKey?: string;
+};
+
+export type TaskLedgerRecord =
+  | TaskLedgerTaskRecord
+  | TaskLedgerAgentRecord
+  | TaskLedgerRecallRecord;
 
 export type TaskLedgerSnapshot = {
   schema: typeof TASK_LEDGER_SNAPSHOT_SCHEMA;
@@ -185,12 +215,31 @@ export type TaskLedgerAgentHeartbeatInput = {
     id: string;
     name?: string;
     status?: AgentActivityStatus;
-    lane?: string;
-    currentTaskId?: string;
-    sessionKey?: string;
+    lane?: string | null;
+    currentTaskId?: string | null;
+    sessionKey?: string | null;
+    worktree?: string | null;
+    branch?: string | null;
     summary?: string;
     metadata?: Record<string, unknown>;
   };
+  ts?: string;
+  idempotencyKey?: string;
+};
+
+export type TaskLedgerRecallTraceInput = {
+  entity: "recall";
+  kind: "trace";
+  sessionKey: string;
+  agentId: string;
+  ran: boolean;
+  skippedReason?: string;
+  scope?: Record<string, unknown>;
+  candidatesConsidered: number;
+  injectedCount: number;
+  injectedChars: number;
+  withheldCount?: number;
+  dependencyStatus: "ok" | "timeout" | "error" | "skipped";
   ts?: string;
   idempotencyKey?: string;
 };
@@ -199,7 +248,8 @@ export type TaskLedgerPublishInput =
   | TaskLedgerTaskUpsertInput
   | TaskLedgerTaskTransitionInput
   | TaskLedgerTaskNoteInput
-  | TaskLedgerAgentHeartbeatInput;
+  | TaskLedgerAgentHeartbeatInput
+  | TaskLedgerRecallTraceInput;
 
 export type TaskLedgerPublishResult = {
   accepted: number;
@@ -481,32 +531,43 @@ function applyRecordToMaps(params: {
     return;
   }
 
-  const existing = agents.get(record.agentId);
-  const heartbeatAt = record.ts;
-  const name = trimToUndefined(record.name) ?? existing?.name ?? record.agentId;
-  agents.set(record.agentId, {
-    id: record.agentId,
-    name,
-    status: record.status,
-    lane: trimToUndefined(record.lane) ?? existing?.lane,
-    currentTaskId:
-      record.currentTaskId === undefined
-        ? existing?.currentTaskId
-        : trimToUndefined(record.currentTaskId),
-    sessionKey:
-      record.sessionKey === undefined ? existing?.sessionKey : trimToUndefined(record.sessionKey),
-    summary: trimToUndefined(record.summary) ?? existing?.summary ?? "Heartbeat",
-    heartbeatAt,
-    lastSeenAt: heartbeatAt,
-    metadata:
-      Object.keys(record.metadata).length > 0
-        ? normalizeMetadata(record.metadata)
-        : (existing?.metadata ?? {}),
-  });
+  if (record.entity === "agent") {
+    const existing = agents.get(record.agentId);
+    const heartbeatAt = record.ts;
+    const name = trimToUndefined(record.name) ?? existing?.name ?? record.agentId;
+    agents.set(record.agentId, {
+      id: record.agentId,
+      name,
+      status: record.status,
+      lane: record.lane === undefined ? existing?.lane : trimToUndefined(record.lane),
+      currentTaskId:
+        record.currentTaskId === undefined
+          ? existing?.currentTaskId
+          : trimToUndefined(record.currentTaskId),
+      sessionKey:
+        record.sessionKey === undefined ? existing?.sessionKey : trimToUndefined(record.sessionKey),
+      worktree:
+        record.worktree === undefined ? existing?.worktree : trimToUndefined(record.worktree),
+      branch: record.branch === undefined ? existing?.branch : trimToUndefined(record.branch),
+      summary: trimToUndefined(record.summary) ?? existing?.summary ?? "Heartbeat",
+      heartbeatAt,
+      lastSeenAt: heartbeatAt,
+      metadata:
+        Object.keys(record.metadata).length > 0
+          ? normalizeMetadata(record.metadata)
+          : (existing?.metadata ?? {}),
+    });
+  }
 }
 
 function getRecordEntityKey(record: TaskLedgerRecord): string {
-  return record.entity === "task" ? `task:${record.taskId}` : `agent:${record.agentId}`;
+  if (record.entity === "task") {
+    return `task:${record.taskId}`;
+  }
+  if (record.entity === "agent") {
+    return `agent:${record.agentId}`;
+  }
+  return `recall:${record.sessionKey}:${record.agentId}`;
 }
 
 function getSeenIdempotencyKeysForEntity(
@@ -533,17 +594,36 @@ function getRecordDedupSignature(record: TaskLedgerRecord): string {
       task: record.task ?? {},
     });
   }
+  if (record.entity === "agent") {
+    return stableStringify({
+      entity: record.entity,
+      kind: record.kind,
+      agentId: record.agentId,
+      name: record.name,
+      status: record.status,
+      lane: record.lane,
+      currentTaskId: record.currentTaskId,
+      sessionKey: record.sessionKey,
+      worktree: record.worktree,
+      branch: record.branch,
+      summary: record.summary,
+      metadata: record.metadata,
+    });
+  }
   return stableStringify({
     entity: record.entity,
     kind: record.kind,
-    agentId: record.agentId,
-    name: record.name,
-    status: record.status,
-    lane: record.lane,
-    currentTaskId: record.currentTaskId,
     sessionKey: record.sessionKey,
-    summary: record.summary,
-    metadata: record.metadata,
+    agentId: record.agentId,
+    ran: record.ran,
+    skippedReason: record.skippedReason,
+    scope: record.scope ?? {},
+    candidatesConsidered: record.candidatesConsidered,
+    injectedCount: record.injectedCount,
+    injectedChars: record.injectedChars,
+    withheldCount: record.withheldCount,
+    dependencyStatus: record.dependencyStatus,
+    ts: record.ts,
   });
 }
 
@@ -660,6 +740,244 @@ function createSnapshotFromRecords(params: {
   };
 }
 
+function isReconcileTaskNote(record: TaskLedgerRecord): record is TaskLedgerTaskRecord {
+  return (
+    record.entity === "task" &&
+    record.kind === "note" &&
+    record.actor.type === "system" &&
+    record.actor.id === RECONCILE_ACTOR_ID
+  );
+}
+
+function buildReconcileIdempotencyKey(kind: string, parts: Array<string | undefined>): string {
+  return `${RECONCILE_IDEMPOTENCY_PREFIX}:${kind}:${parts
+    .map((part) => trimToUndefined(part) ?? "none")
+    .join(":")}`;
+}
+
+function createReconcileTaskNote(params: {
+  taskId: string;
+  ts: string;
+  summary: string;
+  idempotencyKey: string;
+}): TaskLedgerTaskRecord {
+  return {
+    schema: TASK_LEDGER_SCHEMA,
+    id: randomUUID(),
+    ts: params.ts,
+    entity: "task",
+    kind: "note",
+    taskId: params.taskId,
+    summary: params.summary,
+    actor: {
+      type: "system",
+      id: RECONCILE_ACTOR_ID,
+      name: RECONCILE_ACTOR_NAME,
+    },
+    idempotencyKey: params.idempotencyKey,
+  };
+}
+
+function buildReconciliationRecords(materialized: MaterializedLedgerState): TaskLedgerTaskRecord[] {
+  if (materialized.appliedRecords.length === 0) {
+    return [];
+  }
+
+  const lastSubstantiveTaskRecordById = new Map<string, TaskLedgerTaskRecord>();
+  const lastAgentRecordById = new Map<string, TaskLedgerAgentRecord>();
+  const emittedIdempotencyKeys = new Set<string>();
+
+  for (const record of materialized.appliedRecords) {
+    if (record.entity === "task") {
+      if (!isReconcileTaskNote(record)) {
+        lastSubstantiveTaskRecordById.set(record.taskId, record);
+      }
+      continue;
+    }
+    if (record.entity === "agent") {
+      lastAgentRecordById.set(record.agentId, record);
+    }
+  }
+
+  const notes: TaskLedgerTaskRecord[] = [];
+  const activeWorkByAgentId = new Map<
+    string,
+    { taskId: string; tsMs: number; referenceId: string; source: "task" | "heartbeat" }
+  >();
+
+  const queueTaskNote = (taskId: string, summary: string, idempotencyKey: string, ts?: string) => {
+    if (!materialized.tasks.has(taskId) || emittedIdempotencyKeys.has(idempotencyKey)) {
+      return;
+    }
+    emittedIdempotencyKeys.add(idempotencyKey);
+    notes.push(
+      createReconcileTaskNote({
+        taskId,
+        ts: ts ?? materialized.appliedRecords.at(-1)?.ts ?? new Date().toISOString(),
+        summary,
+        idempotencyKey,
+      }),
+    );
+  };
+
+  const considerActiveWork = (
+    agentId: string,
+    candidate: {
+      taskId: string;
+      tsMs: number;
+      referenceId: string;
+      source: "task" | "heartbeat";
+    },
+  ) => {
+    if (!Number.isFinite(candidate.tsMs)) {
+      return;
+    }
+    const current = activeWorkByAgentId.get(agentId);
+    if (!current || candidate.tsMs > current.tsMs) {
+      activeWorkByAgentId.set(agentId, candidate);
+    }
+  };
+
+  for (const task of materialized.tasks.values()) {
+    const assignedAgent = trimToUndefined(task.assignedAgent);
+    const taskRecord = lastSubstantiveTaskRecordById.get(task.id);
+    const taskRecordId = taskRecord?.id;
+    const taskTsMs = taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt);
+
+    if (task.state === "in_progress" && assignedAgent) {
+      considerActiveWork(assignedAgent, {
+        taskId: task.id,
+        tsMs: taskTsMs,
+        referenceId: taskRecordId ?? task.id,
+        source: "task",
+      });
+
+      const agent = materialized.agents.get(assignedAgent);
+      const agentRecord = lastAgentRecordById.get(assignedAgent);
+      const agentRecordId = agentRecord?.id;
+
+      if (!agent || !agentRecord) {
+        queueTaskNote(
+          task.id,
+          `Reconcile warning: task is in progress for assigned agent ${assignedAgent}, but no agent heartbeat is recorded. Verify whether work is still active or reassign the task.`,
+          buildReconcileIdempotencyKey("in-progress-agent-missing", [
+            task.id,
+            taskRecordId,
+            assignedAgent,
+          ]),
+        );
+        continue;
+      }
+
+      if (agent.status === "idle") {
+        queueTaskNote(
+          task.id,
+          `Reconcile warning: task is in progress for assigned agent ${assignedAgent}, but the latest heartbeat reports the agent idle. Verify whether the task should pause or the agent context should be updated.`,
+          buildReconcileIdempotencyKey("in-progress-agent-idle", [
+            task.id,
+            taskRecordId,
+            agentRecordId,
+          ]),
+        );
+        continue;
+      }
+
+      const taskReferenceTsMs = taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt);
+      const staleDeltaMs = taskReferenceTsMs - Date.parse(agent.lastSeenAt);
+      if (Number.isFinite(staleDeltaMs) && staleDeltaMs >= RECONCILE_AGENT_STALE_MS) {
+        queueTaskNote(
+          task.id,
+          `Reconcile warning: task is in progress for assigned agent ${assignedAgent}, but the latest heartbeat is stale (${agent.lastSeenAt}). Verify whether work is still active or refresh the agent task context.`,
+          buildReconcileIdempotencyKey("in-progress-agent-stale", [
+            task.id,
+            taskRecordId,
+            agentRecordId,
+          ]),
+          Number.isFinite(taskReferenceTsMs) ? new Date(taskReferenceTsMs).toISOString() : undefined,
+        );
+      }
+    }
+  }
+
+  for (const agent of materialized.agents.values()) {
+    const currentTaskId = trimToUndefined(agent.currentTaskId);
+    if (!currentTaskId) {
+      continue;
+    }
+    const task = materialized.tasks.get(currentTaskId);
+    const agentRecord = lastAgentRecordById.get(agent.id);
+    if (!task || !agentRecord) {
+      continue;
+    }
+
+    considerActiveWork(agent.id, {
+      taskId: currentTaskId,
+      tsMs: Date.parse(agentRecord.ts),
+      referenceId: agentRecord.id,
+      source: "heartbeat",
+    });
+
+    const taskRecord = lastSubstantiveTaskRecordById.get(task.id);
+    const taskRecordId = taskRecord?.id;
+    const assignedAgent = trimToUndefined(task.assignedAgent);
+
+    if (agent.status !== "idle" && (task.state === "backlog" || task.state === "todo")) {
+      queueTaskNote(
+        task.id,
+        `Reconcile warning: agent ${agent.id} reports active task context for this task (${agent.status}), but the task is still ${task.state}. Verify whether it should move to in progress or clear the stale agent context.`,
+        buildReconcileIdempotencyKey("active-context-task-not-started", [
+          task.id,
+          taskRecordId,
+          agentRecord.id,
+        ]),
+      );
+    }
+
+    if (assignedAgent !== agent.id) {
+      queueTaskNote(
+        task.id,
+        assignedAgent
+          ? `Reconcile warning: agent ${agent.id} heartbeat claims this task as current work, but the task is assigned to ${assignedAgent}. Verify task ownership or clear stale heartbeat context.`
+          : `Reconcile warning: agent ${agent.id} heartbeat claims this task as current work, but the task is currently unassigned. Verify task ownership or clear stale heartbeat context.`,
+        buildReconcileIdempotencyKey("heartbeat-task-assignment-mismatch", [
+          task.id,
+          taskRecordId,
+          agentRecord.id,
+          assignedAgent ?? "unassigned",
+        ]),
+      );
+    }
+  }
+
+  for (const task of materialized.tasks.values()) {
+    const assignedAgent = trimToUndefined(task.assignedAgent);
+    if (task.state !== "blocked" || !assignedAgent) {
+      continue;
+    }
+    const blockedRecord = lastSubstantiveTaskRecordById.get(task.id);
+    const blockedTsMs = blockedRecord ? Date.parse(blockedRecord.ts) : Date.parse(task.lastEventAt);
+    const activeWork = activeWorkByAgentId.get(assignedAgent);
+    if (!activeWork || activeWork.taskId === task.id || !Number.isFinite(blockedTsMs)) {
+      continue;
+    }
+    if (activeWork.tsMs <= blockedTsMs) {
+      continue;
+    }
+    queueTaskNote(
+      task.id,
+      `Reconcile note: blocked task still belongs to ${assignedAgent}, but newer active work exists on ${activeWork.taskId}. Review whether this task is still blocked, should be reassigned, or can be reopened.`,
+      buildReconcileIdempotencyKey("blocked-task-superseded", [
+        task.id,
+        blockedRecord?.id,
+        activeWork.referenceId,
+        activeWork.source,
+      ]),
+    );
+  }
+
+  return notes;
+}
+
 function withRecentEventLimit(
   snapshot: TaskLedgerSnapshot,
   recentEventLimit?: number,
@@ -687,18 +1005,19 @@ function shouldRewriteSnapshot(
     return cached.tasks.length > 0 || cached.agents.length > 0 || cached.recentEvents.length > 0;
   }
 
-  // When the latest event id matches, still repair on-disk drift/corruption in the projection.
-  const cachedProjection = stableStringify({
-    tasks: cached.tasks,
-    agents: cached.agents,
-    recentEvents: cached.recentEvents,
-  });
-  const canonicalProjection = stableStringify({
-    tasks: canonical.tasks,
-    agents: canonical.agents,
-    recentEvents: canonical.recentEvents,
-  });
-  return cachedProjection !== canonicalProjection;
+  // Repair on-disk drift even when the latest event id matches the canonical log.
+  return (
+    stableStringify({
+      tasks: cached.tasks,
+      agents: cached.agents,
+      recentEvents: cached.recentEvents,
+    }) !==
+    stableStringify({
+      tasks: canonical.tasks,
+      agents: canonical.agents,
+      recentEvents: canonical.recentEvents,
+    })
+  );
 }
 
 async function writeSnapshotFile(snapshot: TaskLedgerSnapshot) {
@@ -796,13 +1115,69 @@ function parsePersistedAgentRecord(value: Record<string, unknown>): TaskLedgerAg
     agentId,
     ...(trimToUndefined(value.name) ? { name: trimToUndefined(value.name) } : {}),
     status,
-    ...(trimToUndefined(value.lane) ? { lane: trimToUndefined(value.lane) } : {}),
-    ...(trimToUndefined(value.currentTaskId)
-      ? { currentTaskId: trimToUndefined(value.currentTaskId) }
+    ...(Object.hasOwn(value, "lane") ? { lane: normalizeHeartbeatField(value.lane) } : {}),
+    ...(Object.hasOwn(value, "currentTaskId")
+      ? { currentTaskId: normalizeHeartbeatField(value.currentTaskId) }
       : {}),
-    ...(trimToUndefined(value.sessionKey) ? { sessionKey: trimToUndefined(value.sessionKey) } : {}),
+    ...(Object.hasOwn(value, "sessionKey")
+      ? { sessionKey: normalizeHeartbeatField(value.sessionKey) }
+      : {}),
+    ...(Object.hasOwn(value, "worktree")
+      ? { worktree: normalizeHeartbeatField(value.worktree) }
+      : {}),
+    ...(Object.hasOwn(value, "branch") ? { branch: normalizeHeartbeatField(value.branch) } : {}),
     summary: trimToUndefined(value.summary) ?? "Heartbeat",
     metadata: normalizeMetadata(value.metadata),
+    ...(normalizeIdempotencyKey(value.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(value.idempotencyKey) }
+      : {}),
+  };
+}
+
+function parsePersistedRecallRecord(value: Record<string, unknown>): TaskLedgerRecallRecord | null {
+  const id = normalizePersistedLedgerId(value.id);
+  const ts = normalizePersistedTimestamp(value.ts);
+  const sessionKey = normalizePersistedLedgerId(value.sessionKey);
+  const agentId = normalizePersistedLedgerId(value.agentId);
+  if (!id || !ts || !sessionKey || !agentId || value.kind !== "trace") {
+    return null;
+  }
+  if (typeof value.ran !== "boolean") {
+    return null;
+  }
+  const dependencyStatus =
+    value.dependencyStatus === "ok" ||
+    value.dependencyStatus === "timeout" ||
+    value.dependencyStatus === "error" ||
+    value.dependencyStatus === "skipped"
+      ? value.dependencyStatus
+      : null;
+  if (!dependencyStatus) {
+    return null;
+  }
+
+  const scope = normalizeRecallScope(value.scope);
+
+  return {
+    schema: TASK_LEDGER_SCHEMA,
+    id,
+    ts,
+    entity: "recall",
+    kind: "trace",
+    sessionKey,
+    agentId,
+    ran: value.ran,
+    ...(trimToUndefined(value.skippedReason)
+      ? { skippedReason: trimToUndefined(value.skippedReason) }
+      : {}),
+    ...(scope ? { scope } : {}),
+    candidatesConsidered: normalizeNonNegativeInteger(value.candidatesConsidered),
+    injectedCount: normalizeNonNegativeInteger(value.injectedCount),
+    injectedChars: normalizeNonNegativeInteger(value.injectedChars),
+    ...(typeof value.withheldCount === "number"
+      ? { withheldCount: normalizeNonNegativeInteger(value.withheldCount) }
+      : {}),
+    dependencyStatus,
     ...(normalizeIdempotencyKey(value.idempotencyKey)
       ? { idempotencyKey: normalizeIdempotencyKey(value.idempotencyKey) }
       : {}),
@@ -822,6 +1197,9 @@ function parsePersistedTaskLedgerRecord(value: unknown): TaskLedgerRecord | null
   }
   if (record.entity === "agent") {
     return parsePersistedAgentRecord(record);
+  }
+  if (record.entity === "recall") {
+    return parsePersistedRecallRecord(record);
   }
   return null;
 }
@@ -1025,6 +1403,81 @@ function normalizeTaskNoteRecord(
   };
 }
 
+function normalizeHeartbeatField(value: unknown): string | null {
+  return trimToUndefined(value) ?? null;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+function normalizeRecallScope(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const raw = normalizeMetadata(value);
+  const scope: Record<string, string> = {};
+  const senderId = trimToUndefined(raw.senderId);
+  if (senderId) {
+    scope.senderId = senderId;
+  }
+
+  const channelClass = trimToUndefined(raw.channelClass);
+  if (channelClass) {
+    scope.channelClass = channelClass;
+  }
+
+  const threadId = trimToUndefined(raw.threadId);
+  if (threadId) {
+    scope.threadId = threadId;
+  }
+
+  const resourceId = trimToUndefined(raw.resourceId);
+  if (resourceId) {
+    scope.resourceId = resourceId;
+  }
+
+  return Object.keys(scope).length > 0 ? scope : undefined;
+}
+
+function normalizeRecallRecord(input: TaskLedgerRecallTraceInput): TaskLedgerRecallRecord {
+  const ts = normalizeTimestamp(input.ts);
+  const scope = normalizeRecallScope(input.scope);
+  return {
+    schema: TASK_LEDGER_SCHEMA,
+    id: randomUUID(),
+    ts,
+    entity: "recall",
+    kind: "trace",
+    sessionKey: normalizeLedgerId(input.sessionKey, "recall session key"),
+    agentId: normalizeLedgerId(input.agentId, "recall agent id"),
+    ran: input.ran === true,
+    ...(trimToUndefined(input.skippedReason)
+      ? { skippedReason: trimToUndefined(input.skippedReason) }
+      : {}),
+    ...(scope ? { scope } : {}),
+    candidatesConsidered: normalizeNonNegativeInteger(input.candidatesConsidered),
+    injectedCount: normalizeNonNegativeInteger(input.injectedCount),
+    injectedChars: normalizeNonNegativeInteger(input.injectedChars),
+    ...(typeof input.withheldCount === "number"
+      ? { withheldCount: normalizeNonNegativeInteger(input.withheldCount) }
+      : {}),
+    dependencyStatus:
+      input.dependencyStatus === "timeout" ||
+      input.dependencyStatus === "error" ||
+      input.dependencyStatus === "skipped"
+        ? input.dependencyStatus
+        : "ok",
+    ...(normalizeIdempotencyKey(input.idempotencyKey)
+      ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
+      : {}),
+  };
+}
+
 function normalizeAgentRecord(input: TaskLedgerAgentHeartbeatInput): TaskLedgerAgentRecord {
   const ts = normalizeTimestamp(input.ts);
   const agentId = normalizeLedgerId(input.agent.id, "agent id");
@@ -1037,13 +1490,11 @@ function normalizeAgentRecord(input: TaskLedgerAgentHeartbeatInput): TaskLedgerA
     agentId,
     ...(trimToUndefined(input.agent.name) ? { name: trimToUndefined(input.agent.name) } : {}),
     status: isAgentActivityStatus(input.agent.status) ? input.agent.status : "idle",
-    ...(trimToUndefined(input.agent.lane) ? { lane: trimToUndefined(input.agent.lane) } : {}),
-    ...(trimToUndefined(input.agent.currentTaskId)
-      ? { currentTaskId: trimToUndefined(input.agent.currentTaskId) }
-      : {}),
-    ...(trimToUndefined(input.agent.sessionKey)
-      ? { sessionKey: trimToUndefined(input.agent.sessionKey) }
-      : {}),
+    lane: normalizeHeartbeatField(input.agent.lane),
+    currentTaskId: normalizeHeartbeatField(input.agent.currentTaskId),
+    sessionKey: normalizeHeartbeatField(input.agent.sessionKey),
+    worktree: normalizeHeartbeatField(input.agent.worktree),
+    branch: normalizeHeartbeatField(input.agent.branch),
     summary: trimToUndefined(input.agent.summary) ?? "Heartbeat",
     metadata: normalizeMetadata(input.agent.metadata),
     ...(normalizeIdempotencyKey(input.idempotencyKey)
@@ -1067,6 +1518,9 @@ function normalizePublishRecord(
   if (input.entity === "task") {
     const taskId = normalizeLedgerId(input.taskId, "task id");
     return normalizeTaskNoteRecord(input, tasks.get(taskId));
+  }
+  if (input.entity === "recall") {
+    return normalizeRecallRecord(input);
   }
   const agentId = normalizeLedgerId(input.agent.id, "agent id");
   return normalizeAgentRecord({
@@ -1110,6 +1564,22 @@ export async function publishTaskLedgerEvents(params: {
         tasks: materialized.tasks,
         agents: materialized.agents,
       });
+      materialized.appliedRecords.push(record);
+      rememberAcceptedRecord(record, materialized);
+      accepted.push(record);
+    }
+
+    const reconcileRecords = buildReconciliationRecords(materialized);
+    for (const record of reconcileRecords) {
+      if (shouldSkipDuplicateRecord(record, materialized)) {
+        continue;
+      }
+      applyRecordToMaps({
+        record,
+        tasks: materialized.tasks,
+        agents: materialized.agents,
+      });
+      materialized.appliedRecords.push(record);
       rememberAcceptedRecord(record, materialized);
       accepted.push(record);
     }

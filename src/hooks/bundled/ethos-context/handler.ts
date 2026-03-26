@@ -1,5 +1,7 @@
 import type { OpenClawConfig } from "../../../config/config.js";
+import { publishTaskLedgerEvents } from "../../../infra/task-ledger.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
+import { deriveSessionChatType } from "../../../sessions/session-key-utils.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveCanonicalResourceId,
@@ -46,6 +48,17 @@ type EthosSearchRecord = {
 type SearchCircuitState = {
   failureTimestampsMs: number[];
   openUntilMs: number;
+};
+
+type RecallTraceDependencyStatus = "ok" | "timeout" | "error" | "skipped";
+type RecallTraceSkippedReason = "canary_gate" | "missing_scope" | "circuit_breaker";
+type RecallTraceChannelClass = "dm" | "group" | "unknown";
+
+type BuiltContextBlock = {
+  prependContext: string;
+  injectedCount: number;
+  injectedChars: number;
+  withheldCount: number;
 };
 
 const searchCircuitState: SearchCircuitState = {
@@ -107,6 +120,20 @@ function normalizeScopeValue(value?: string): string | undefined {
   return trimmed ? trimmed.toLowerCase() : undefined;
 }
 
+function resolveRecallChannelClass(params: {
+  sessionKey?: string;
+  senderId?: string;
+}): RecallTraceChannelClass {
+  const chatType = deriveSessionChatType(params.sessionKey);
+  if (chatType === "direct") {
+    return "dm";
+  }
+  if (chatType === "group" || chatType === "channel") {
+    return "group";
+  }
+  return params.senderId ? "dm" : "unknown";
+}
+
 function isCanaryAllowed(canaryAgents: string[], agentId?: string): boolean {
   if (canaryAgents.length === 0) {
     return false;
@@ -130,18 +157,14 @@ function resolveOwnerCanonicalIdentityKey(
     return undefined;
   }
   const keys = Object.keys(identityLinks)
-    .map((k) => k.trim())
+    .map((key) => key.trim())
     .filter(Boolean);
   if (keys.length === 0) {
     return undefined;
   }
-  // Prefer common canonical labels if present, otherwise if there is only one, use it.
-  const preferred = ["owner", "michael"].find((k) => identityLinks[k]?.length);
+  const preferred = ["owner", "michael"].find((key) => identityLinks[key]?.length);
   if (preferred) {
     return preferred;
-  }
-  if (keys.length === 1) {
-    return keys[0];
   }
   return keys[0];
 }
@@ -230,6 +253,7 @@ function extractRecordFromObject(value: Record<string, unknown>): EthosSearchRec
     extractTimestamp(metadata?.messageTimestamp) ??
     extractTimestamp(metadata?.eventTimestamp) ??
     extractTimestamp(metadata?.ingestTimestamp);
+
   return {
     text: contentCandidate,
     id:
@@ -302,25 +326,19 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
 
   let entriesToKeep = total;
   let textLimit = 600;
-  let includeOptionalFields = true;
+  let includeProvenance = true;
 
   while (entriesToKeep >= 1) {
     const selected = params.records.slice(0, entriesToKeep);
     const memories = selected.map((record) =>
       compactRecord({
         text: escapeDelimiterCollision(normalizeContent(record.text, textLimit)),
-        id: record.id ? escapeDelimiterCollision(record.id) : undefined,
-        created_at: record.createdAt ? escapeDelimiterCollision(record.createdAt) : undefined,
-        source: record.source ? escapeDelimiterCollision(record.source) : undefined,
-        score: includeOptionalFields ? record.score : undefined,
-        resource_id:
-          includeOptionalFields && record.resourceId
-            ? escapeDelimiterCollision(record.resourceId)
+        created_at:
+          includeProvenance && record.createdAt
+            ? escapeDelimiterCollision(record.createdAt)
             : undefined,
-        thread_id:
-          includeOptionalFields && record.threadId
-            ? escapeDelimiterCollision(record.threadId)
-            : undefined,
+        source:
+          includeProvenance && record.source ? escapeDelimiterCollision(record.source) : undefined,
       }),
     );
 
@@ -341,13 +359,13 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
       continue;
     }
 
-    if (textLimit > 120) {
-      textLimit = Math.max(120, Math.floor(textLimit * 0.75));
+    if (textLimit > 32) {
+      textLimit = Math.max(32, Math.floor(textLimit * 0.75));
       continue;
     }
 
-    if (includeOptionalFields) {
-      includeOptionalFields = false;
+    if (includeProvenance) {
+      includeProvenance = false;
       continue;
     }
 
@@ -363,28 +381,65 @@ function buildContextBlock(params: { records: EthosSearchRecord[]; maxChars: num
   return "";
 }
 
+function buildContextBlockResult(params: {
+  records: EthosSearchRecord[];
+  maxChars: number;
+}): BuiltContextBlock | null {
+  const prependContext = buildContextBlock(params);
+  if (!prependContext) {
+    return null;
+  }
+  const jsonStart = prependContext.indexOf("\n");
+  const jsonEnd = prependContext.lastIndexOf("\n");
+  if (jsonStart < 0 || jsonEnd <= jsonStart) {
+    return {
+      prependContext,
+      injectedCount: 0,
+      injectedChars: 0,
+      withheldCount: params.records.length,
+    };
+  }
+  try {
+    const payload = JSON.parse(
+      prependContext.slice(jsonStart + 1, jsonEnd),
+    ) as { memories?: Array<{ text?: string }> };
+    const memories = Array.isArray(payload.memories) ? payload.memories : [];
+    return {
+      prependContext,
+      injectedCount: memories.length,
+      injectedChars: memories.reduce(
+        (total, memory) => total + (typeof memory.text === "string" ? memory.text.length : 0),
+        0,
+      ),
+      withheldCount: Math.max(0, params.records.length - memories.length),
+    };
+  } catch {
+    return {
+      prependContext,
+      injectedCount: 0,
+      injectedChars: 0,
+      withheldCount: params.records.length,
+    };
+  }
+}
+
 function recordMatchesScope(params: {
   record: EthosSearchRecord;
-  resourceId?: string;
+  resourceId: string;
   threadId?: string;
 }): boolean {
   const expectedResourceId = normalizeScopeValue(params.resourceId);
-  if (expectedResourceId) {
-    const recordResourceId = normalizeScopeValue(params.record.resourceId);
-    if (!recordResourceId || recordResourceId !== expectedResourceId) {
-      return false;
-    }
+  const recordResourceId = normalizeScopeValue(params.record.resourceId);
+  if (expectedResourceId && recordResourceId && recordResourceId !== expectedResourceId) {
+    return false;
   }
 
   const expectedThreadId = normalizeScopeValue(params.threadId);
-  if (expectedThreadId) {
-    const recordThreadId = normalizeScopeValue(params.record.threadId);
-    if (!recordThreadId || recordThreadId !== expectedThreadId) {
-      return false;
-    }
+  if (expectedThreadId && normalizeScopeValue(params.record.threadId) !== expectedThreadId) {
+    return false;
   }
 
-  return Boolean(expectedResourceId || expectedThreadId);
+  return true;
 }
 
 function pruneSearchFailures(nowMs: number): void {
@@ -453,6 +508,52 @@ async function postSearchWithTimeout(params: {
   }
 }
 
+async function emitRecallTrace(params: {
+  sessionKey?: string;
+  agentId?: string;
+  senderId?: string;
+  ran: boolean;
+  skippedReason?: RecallTraceSkippedReason;
+  candidatesConsidered: number;
+  injectedCount: number;
+  injectedChars: number;
+  withheldCount?: number;
+  dependencyStatus: RecallTraceDependencyStatus;
+}): Promise<void> {
+  const sessionKey = resolveOptionalString(params.sessionKey) ?? "unknown";
+  const agentId = resolveOptionalString(params.agentId) ?? "unknown";
+
+  try {
+    await publishTaskLedgerEvents({
+      events: [
+        {
+          entity: "recall",
+          kind: "trace",
+          sessionKey,
+          agentId,
+          ran: params.ran,
+          ...(params.skippedReason ? { skippedReason: params.skippedReason } : {}),
+          scope: {
+            ...(params.senderId ? { senderId: params.senderId } : {}),
+            channelClass: resolveRecallChannelClass({
+              sessionKey: params.sessionKey,
+              senderId: params.senderId,
+            }),
+          },
+          candidatesConsidered: params.candidatesConsidered,
+          injectedCount: params.injectedCount,
+          injectedChars: params.injectedChars,
+          ...(params.withheldCount !== undefined ? { withheldCount: params.withheldCount } : {}),
+          dependencyStatus: params.dependencyStatus,
+        },
+      ],
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.debug("Ethos context recall trace publish failed", { message });
+  }
+}
+
 const ethosContextHook: HookHandler = async (event) => {
   if (!isAgentBeforePromptBuildEvent(event)) {
     return;
@@ -484,21 +585,39 @@ const ethosContextHook: HookHandler = async (event) => {
     resolveOptionalString(context.agentId) ?? resolveAgentIdFromSessionKey(event.sessionKey);
   const canaryAgents = resolveStringArray(hookConfig.canaryAgents);
   if (!isCanaryAllowed(canaryAgents, agentId)) {
+    await emitRecallTrace({
+      sessionKey: event.sessionKey,
+      agentId,
+      senderId: resolveOptionalString(context.senderId),
+      ran: false,
+      skippedReason: "canary_gate",
+      candidatesConsidered: 0,
+      injectedCount: 0,
+      injectedChars: 0,
+      dependencyStatus: "skipped",
+    });
     return;
   }
 
   const channelId = resolveOptionalString(context.channelId);
   if (!channelId) {
     log.debug("Ethos context channelId missing; skipping scoped injection");
+    await emitRecallTrace({
+      sessionKey: event.sessionKey,
+      agentId,
+      senderId: resolveOptionalString(context.senderId),
+      ran: false,
+      skippedReason: "missing_scope",
+      candidatesConsidered: 0,
+      injectedCount: 0,
+      injectedChars: 0,
+      dependencyStatus: "skipped",
+    });
     return;
   }
 
   const senderId = resolveOptionalString(context.senderId);
   const senderIsOwner = context.senderIsOwner === true;
-
-  // For direct-owner DMs, OpenClaw may omit SenderId in the session context.
-  // If we can confirm the sender is the configured owner, fall back to a canonical
-  // identity key from session.identityLinks.
   const resourceId = senderId
     ? resolveCanonicalResourceId({
         identityLinks: cfg?.session?.identityLinks,
@@ -511,6 +630,16 @@ const ethosContextHook: HookHandler = async (event) => {
 
   if (!resourceId && !senderId) {
     log.debug("Ethos context senderId missing (and not owner); skipping scoped injection");
+    await emitRecallTrace({
+      sessionKey: event.sessionKey,
+      agentId,
+      ran: false,
+      skippedReason: "missing_scope",
+      candidatesConsidered: 0,
+      injectedCount: 0,
+      injectedChars: 0,
+      dependencyStatus: "skipped",
+    });
     return;
   }
 
@@ -520,6 +649,17 @@ const ethosContextHook: HookHandler = async (event) => {
   if (isSearchCircuitOpen(nowMs)) {
     log.debug("Ethos context search circuit breaker active; skipping injection", {
       retryInMs: Math.max(0, searchCircuitState.openUntilMs - nowMs),
+    });
+    await emitRecallTrace({
+      sessionKey: event.sessionKey,
+      agentId,
+      senderId,
+      ran: false,
+      skippedReason: "circuit_breaker",
+      candidatesConsidered: 0,
+      injectedCount: 0,
+      injectedChars: 0,
+      dependencyStatus: "skipped",
     });
     return;
   }
@@ -538,7 +678,10 @@ const ethosContextHook: HookHandler = async (event) => {
   });
   const timeoutMs = resolvePositiveInt(hookConfig.timeoutMs, DEFAULT_TIMEOUT_MS);
 
-  const requestedThreadId = resourceId ? undefined : threadId;
+  const requestedThreadId = threadId;
+  const clearInjectedContext = () => {
+    delete (context as { prependContext?: unknown }).prependContext;
+  };
 
   try {
     const searchResponse = await postSearchWithTimeout({
@@ -556,6 +699,17 @@ const ethosContextHook: HookHandler = async (event) => {
 
     if (!searchResponse) {
       recordSearchFailure(Date.now());
+      clearInjectedContext();
+      await emitRecallTrace({
+        sessionKey: event.sessionKey,
+        agentId,
+        senderId,
+        ran: true,
+        candidatesConsidered: 0,
+        injectedCount: 0,
+        injectedChars: 0,
+        dependencyStatus: "error",
+      });
       return;
     }
 
@@ -571,19 +725,65 @@ const ethosContextHook: HookHandler = async (event) => {
       )
       .slice(0, limit);
     if (scopedRecords.length === 0) {
+      clearInjectedContext();
+      await emitRecallTrace({
+        sessionKey: event.sessionKey,
+        agentId,
+        senderId,
+        ran: true,
+        candidatesConsidered: 0,
+        injectedCount: 0,
+        injectedChars: 0,
+        dependencyStatus: "ok",
+      });
       return;
     }
 
-    const prependContext = buildContextBlock({ records: scopedRecords, maxChars });
-    if (!prependContext) {
+    const builtContext = buildContextBlockResult({ records: scopedRecords, maxChars });
+    if (!builtContext) {
+      clearInjectedContext();
+      await emitRecallTrace({
+        sessionKey: event.sessionKey,
+        agentId,
+        senderId,
+        ran: true,
+        candidatesConsidered: scopedRecords.length,
+        injectedCount: 0,
+        injectedChars: 0,
+        withheldCount: scopedRecords.length,
+        dependencyStatus: "ok",
+      });
       return;
     }
 
-    context.prependContext = prependContext;
+    context.prependContext = builtContext.prependContext;
+    await emitRecallTrace({
+      sessionKey: event.sessionKey,
+      agentId,
+      senderId,
+      ran: true,
+      candidatesConsidered: scopedRecords.length,
+      injectedCount: builtContext.injectedCount,
+      injectedChars: builtContext.injectedChars,
+      withheldCount: builtContext.withheldCount,
+      dependencyStatus: "ok",
+    });
   } catch (error) {
     recordSearchFailure(Date.now());
+    clearInjectedContext();
     const message = error instanceof Error ? error.message : String(error);
     log.debug("Ethos context request failed", { message });
+    await emitRecallTrace({
+      sessionKey: event.sessionKey,
+      agentId,
+      senderId,
+      ran: true,
+      candidatesConsidered: 0,
+      injectedCount: 0,
+      injectedChars: 0,
+      dependencyStatus:
+        error instanceof Error && error.name === "AbortError" ? "timeout" : "error",
+    });
   }
 };
 

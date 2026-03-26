@@ -9,6 +9,7 @@ import {
   isValidAgentId,
   parseAgentSessionKey,
   resolveCanonicalResourceId,
+  scopedHeartbeatWakeOptions,
   toAgentStoreSessionKey,
 } from "./session-key.js";
 
@@ -97,6 +98,36 @@ describe("deriveSessionChatType", () => {
     expect(deriveSessionChatType("agent:main:main")).toBe("unknown");
     expect(deriveSessionChatType("agent:main")).toBe("unknown");
     expect(deriveSessionChatType("")).toBe("unknown");
+  });
+});
+
+describe("scopedHeartbeatWakeOptions", () => {
+  it("injects canonical agent scoping for legacy keys", () => {
+    expect(
+      scopedHeartbeatWakeOptions("main", {
+        reason: "heartbeat",
+      }),
+    ).toEqual({ reason: "heartbeat", sessionKey: "agent:main:main" });
+
+    expect(
+      scopedHeartbeatWakeOptions("telegram:dm:123", {
+        reason: "heartbeat",
+      }),
+    ).toEqual({ reason: "heartbeat", sessionKey: "agent:main:telegram:dm:123" });
+  });
+
+  it("falls back to provided agent-scoped key unchanged when already canonical", () => {
+    expect(
+      scopedHeartbeatWakeOptions("agent:forge:discord:dm:7", {
+        reason: "heartbeat",
+      }),
+    ).toEqual({ reason: "heartbeat", sessionKey: "agent:forge:discord:dm:7" });
+  });
+
+  it("ignores empty keys", () => {
+    expect(scopedHeartbeatWakeOptions("   ", { reason: "heartbeat" })).toEqual({
+      reason: "heartbeat",
+    });
   });
 });
 

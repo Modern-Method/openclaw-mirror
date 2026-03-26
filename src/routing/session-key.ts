@@ -34,7 +34,20 @@ export function scopedHeartbeatWakeOptions<T extends object>(
   sessionKey: string,
   wakeOptions: T,
 ): T | (T & { sessionKey: string }) {
-  return parseAgentSessionKey(sessionKey) ? { ...wakeOptions, sessionKey } : wakeOptions;
+  const parsed = parseAgentSessionKey(sessionKey);
+  if (!parsed) {
+    const normalized = normalizeToken(sessionKey);
+    if (!normalized) {
+      return wakeOptions;
+    }
+    return {
+      ...wakeOptions,
+      sessionKey: normalized.startsWith("agent:")
+        ? `agent:${DEFAULT_AGENT_ID}:${normalized.slice("agent:".length)}`
+        : `agent:${DEFAULT_AGENT_ID}:${normalized}`,
+    };
+  }
+  return { ...wakeOptions, sessionKey };
 }
 
 export function normalizeMainKey(value: string | undefined | null): string {

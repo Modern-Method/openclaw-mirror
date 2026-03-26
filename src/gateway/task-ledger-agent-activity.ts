@@ -1,5 +1,9 @@
 import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
-import type { AgentEventPayload } from "../infra/agent-events.js";
+import {
+  getAgentRunContext,
+  type AgentEventPayload,
+  type AgentRunContext,
+} from "../infra/agent-events.js";
 import {
   publishTaskLedgerEvents,
   type AgentActivityStatus,
@@ -102,12 +106,17 @@ function buildLifecycleIdempotencyKey(evt: AgentEventPayload, agentId: string): 
 
 export function buildTaskLedgerAgentHeartbeatFromLifecycleEvent(
   evt: AgentEventPayload,
-  options?: { resolveAgentId?: (sessionKey: string) => string | undefined },
+  options?: {
+    resolveAgentId?: (sessionKey: string) => string | undefined;
+    resolveRunContext?: (runId: string) => AgentRunContext | undefined;
+  },
 ): TaskLedgerAgentHeartbeatInput | null {
   if (evt.stream !== "lifecycle") {
     return null;
   }
-  const sessionKey = trimToUndefined(evt.sessionKey);
+  const runContext =
+    evt.runContext ?? options?.resolveRunContext?.(evt.runId) ?? getAgentRunContext(evt.runId);
+  const sessionKey = trimToUndefined(evt.sessionKey ?? runContext?.sessionKey);
   if (!sessionKey) {
     return null;
   }
@@ -131,7 +140,11 @@ export function buildTaskLedgerAgentHeartbeatFromLifecycleEvent(
       id: agentId,
       name: agentId,
       status,
+      ...(runContext ? { lane: runContext.lane } : {}),
+      ...(runContext ? { currentTaskId: runContext.currentTaskId } : {}),
       sessionKey,
+      ...(runContext ? { worktree: runContext.worktree } : {}),
+      ...(runContext ? { branch: runContext.branch } : {}),
       summary,
       metadata: {
         runId: evt.runId,
@@ -162,12 +175,14 @@ export function createTaskLedgerAgentActivityListener(params: {
   broadcast: (topic: string, payload: unknown, options: { dropIfSlow: boolean }) => void;
   publish?: typeof publishTaskLedgerEvents;
   resolveAgentId?: (sessionKey: string) => string | undefined;
+  resolveRunContext?: (runId: string) => AgentRunContext | undefined;
   onError?: (error: unknown) => void;
 }) {
   const publish = params.publish ?? publishTaskLedgerEvents;
   return (evt: AgentEventPayload) => {
     const heartbeat = buildTaskLedgerAgentHeartbeatFromLifecycleEvent(evt, {
       resolveAgentId: params.resolveAgentId,
+      resolveRunContext: params.resolveRunContext,
     });
     if (!heartbeat) {
       return;

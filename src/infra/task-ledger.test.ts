@@ -73,7 +73,11 @@ describe("task ledger", () => {
             id: "sebastian",
             name: "Sebastian",
             status: "running",
+            lane: "pinned",
             currentTaskId: "task-1",
+            sessionKey: "agent:sebastian:main",
+            worktree: "/tmp/openclaw-p0-2-heartbeat-contract-20260325",
+            branch: "feat/task-ledger-p0-2-heartbeat-contract-20260325",
             summary: "Implementing ledger substrate",
             metadata: { host: "ganymede" },
           },
@@ -106,7 +110,7 @@ describe("task ledger", () => {
     const events = await readTaskLedgerEvents({ stateDir });
     const persistedSnapshot = await readSnapshotFile(stateDir);
 
-    expect(created.accepted).toBe(2);
+    expect(created.accepted).toBe(3);
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.tasks[0]).toMatchObject({
       id: "task-1",
@@ -120,16 +124,149 @@ describe("task ledger", () => {
       id: "sebastian",
       name: "Sebastian",
       status: "running",
+      lane: "pinned",
       currentTaskId: "task-1",
+      sessionKey: "agent:sebastian:main",
+      worktree: "/tmp/openclaw-p0-2-heartbeat-contract-20260325",
+      branch: "feat/task-ledger-p0-2-heartbeat-contract-20260325",
+    });
+    expect(events.find((event) => event.entity === "agent")).toMatchObject({
+      entity: "agent",
+      agentId: "sebastian",
+      status: "running",
+      lane: "pinned",
+      currentTaskId: "task-1",
+      sessionKey: "agent:sebastian:main",
+      worktree: "/tmp/openclaw-p0-2-heartbeat-contract-20260325",
+      branch: "feat/task-ledger-p0-2-heartbeat-contract-20260325",
+      summary: "Implementing ledger substrate",
     });
     expect(snapshot.recentEvents.map((event) => event.kind)).toEqual([
       "created",
       "heartbeat",
+      "note",
       "state_changed",
       "note",
     ]);
-    expect(events).toHaveLength(4);
+    expect(events).toHaveLength(5);
     expect(persistedSnapshot.tasks[0]).toMatchObject({ id: "task-1", state: "in_progress" });
+  });
+
+  it("clears explicit heartbeat contract fields when a later heartbeat omits them", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            lane: "build",
+            currentTaskId: "task-1",
+            sessionKey: "agent:forge:main",
+            worktree: "/tmp/openclaw-p0-2-heartbeat-contract-20260325",
+            branch: "feat/task-ledger-p0-2-heartbeat-contract-20260325",
+            summary: "Working task",
+          },
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "idle",
+            lane: undefined,
+            currentTaskId: undefined,
+            sessionKey: undefined,
+            worktree: undefined,
+            branch: undefined,
+            summary: "Heartbeat",
+          },
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const agentEvents = await readTaskLedgerEvents({ stateDir, agentId: "forge" });
+
+    expect(snapshot.agents[0]).toMatchObject({
+      id: "forge",
+      status: "idle",
+      summary: "Heartbeat",
+      lane: undefined,
+      currentTaskId: undefined,
+      sessionKey: undefined,
+      worktree: undefined,
+      branch: undefined,
+    });
+    expect(agentEvents[1]).toMatchObject({
+      entity: "agent",
+      kind: "heartbeat",
+      lane: null,
+      currentTaskId: null,
+      sessionKey: null,
+      worktree: null,
+      branch: null,
+    });
+  });
+
+  it("clears heartbeat contract fields even when the later heartbeat omits the keys entirely", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            lane: "build",
+            currentTaskId: "task-1",
+            sessionKey: "agent:forge:main",
+            worktree: "/tmp/openclaw-p0-2-heartbeat-contract-20260325",
+            branch: "feat/task-ledger-p0-2-heartbeat-contract-20260325",
+            summary: "Working task",
+          },
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "idle",
+            summary: "Run finished",
+          },
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const agentEvents = await readTaskLedgerEvents({ stateDir, agentId: "forge" });
+
+    expect(snapshot.agents[0]).toMatchObject({
+      id: "forge",
+      status: "idle",
+      summary: "Run finished",
+      lane: undefined,
+      currentTaskId: undefined,
+      sessionKey: undefined,
+      worktree: undefined,
+      branch: undefined,
+    });
+    expect(agentEvents[1]).toMatchObject({
+      entity: "agent",
+      kind: "heartbeat",
+      lane: null,
+      currentTaskId: null,
+      sessionKey: null,
+      worktree: null,
+      branch: null,
+    });
   });
 
   it("filters event reads by task id and agent id", async () => {
@@ -517,6 +654,334 @@ describe("task ledger", () => {
         .filter((event) => event.entity === "agent")
         .map((event) => event.idempotencyKey),
     ).toEqual(["run-1:start", "run-1:end"]);
+  });
+
+  it("emits reconcile evidence when an active agent points at a task that is still todo", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Start me", state: "todo", assignedAgent: "forge" },
+          ts: "2026-03-15T06:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-1",
+            summary: "Working task-1",
+          },
+          ts: "2026-03-15T06:01:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)).toMatchObject({
+      entity: "task",
+      kind: "note",
+      taskId: "task-1",
+      actor: { type: "system", id: "task-ledger-reconciler" },
+    });
+    expect(taskEvents.at(-1)?.summary).toMatch(/still todo/i);
+  });
+
+  it("emits reconcile evidence when an in-progress task is assigned to an idle agent", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-1",
+            title: "Investigate drift",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T06:10:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "idle",
+            currentTaskId: "task-1",
+            summary: "Waiting",
+          },
+          ts: "2026-03-15T06:10:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)?.summary).toMatch(/latest heartbeat reports the agent idle/i);
+  });
+
+  it("emits reconcile evidence when an in-progress task is assigned to a stale agent heartbeat", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-1",
+            summary: "Earlier run",
+          },
+          ts: "2026-03-15T06:20:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-1",
+            title: "Resume task",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T06:40:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)?.summary).toMatch(/latest heartbeat is stale/i);
+    expect(taskEvents.at(-1)?.summary).toContain("2026-03-15T06:20:00.000Z");
+  });
+
+  it("emits reconcile evidence when older blocked work coexists with newer active work for the same agent", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Blocked work", state: "blocked", assignedAgent: "forge" },
+          ts: "2026-03-15T06:50:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-2",
+            title: "Active work",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T07:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-2",
+            summary: "Working task-2",
+          },
+          ts: "2026-03-15T07:00:00.000Z",
+        },
+      ],
+    });
+
+    const blockedTaskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    expect(result.accepted).toBe(4);
+    expect(blockedTaskEvents.at(-1)?.summary).toMatch(/newer active work exists on task-2/i);
+  });
+
+  it("emits reconcile evidence when heartbeat task context disagrees with task ownership", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Already closed", state: "done", assignedAgent: "atlas" },
+          ts: "2026-03-15T07:10:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-1",
+            summary: "Still on task-1",
+          },
+          ts: "2026-03-15T07:11:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)?.summary).toMatch(/task is assigned to atlas/i);
+  });
+
+  it("accepts recall trace events without mutating task/agent projections", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "recall",
+          kind: "trace",
+          sessionKey: "agent:forge:main",
+          agentId: "forge",
+          ran: true,
+          scope: { senderId: "8480568759", channelClass: "dm" },
+          candidatesConsidered: 3,
+          injectedCount: 1,
+          injectedChars: 42,
+          withheldCount: 2,
+          dependencyStatus: "ok",
+          idempotencyKey: "recall:trace:1",
+          ts: "2026-03-15T07:20:00.000Z",
+        },
+      ],
+    });
+
+    expect(result.accepted).toBe(1);
+    expect(result.events[0]).toMatchObject({
+      entity: "recall",
+      kind: "trace",
+      sessionKey: "agent:forge:main",
+      agentId: "forge",
+      ran: true,
+      dependencyStatus: "ok",
+      candidatesConsidered: 3,
+      injectedCount: 1,
+      injectedChars: 42,
+      withheldCount: 2,
+    });
+
+    const events = await readTaskLedgerEvents({ stateDir });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ entity: "recall", kind: "trace" });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    expect(snapshot.tasks).toEqual([]);
+    expect(snapshot.agents).toEqual([]);
+    expect(snapshot.recentEvents).toHaveLength(1);
+    expect(snapshot.recentEvents[0]).toMatchObject({ entity: "recall", kind: "trace" });
+  });
+
+  it("accepts distinct recall trace events with identical payload within the dedupe window", async () => {
+    const stateDir = await createStateDir();
+
+    const first = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "recall",
+          kind: "trace",
+          sessionKey: "agent:forge:main",
+          agentId: "forge",
+          ran: true,
+          scope: { senderId: "8480568759", channelClass: "dm" },
+          candidatesConsidered: 3,
+          injectedCount: 1,
+          injectedChars: 42,
+          withheldCount: 2,
+          dependencyStatus: "ok",
+          ts: "2026-03-15T07:21:00.000Z",
+        },
+      ],
+    });
+
+    const second = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "recall",
+          kind: "trace",
+          sessionKey: "agent:forge:main",
+          agentId: "forge",
+          ran: true,
+          scope: { senderId: "8480568759", channelClass: "dm" },
+          candidatesConsidered: 3,
+          injectedCount: 1,
+          injectedChars: 42,
+          withheldCount: 2,
+          dependencyStatus: "ok",
+          ts: "2026-03-15T07:21:00.400Z",
+        },
+      ],
+    });
+
+    expect(first.accepted).toBe(1);
+    expect(second.accepted).toBe(1);
+
+    const events = await readTaskLedgerEvents({ stateDir });
+    expect(events).toHaveLength(2);
+  });
+
+  it("normalizes recall scope to allowed string keys", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "recall",
+          kind: "trace",
+          sessionKey: "agent:forge:main",
+          agentId: "forge",
+          ran: true,
+          scope: {
+            senderId: "8480568759",
+            channelClass: "dm",
+            threadId: "agent:main:thread",
+            resourceId: "agent:main:resource",
+            ignored: { nested: true },
+            dropped: 11,
+          } as unknown as Record<string, string>,
+          candidatesConsidered: 1,
+          injectedCount: 0,
+          injectedChars: 0,
+          withheldCount: 0,
+          dependencyStatus: "none",
+          ts: "2026-03-15T07:22:00.000Z",
+        },
+      ],
+    });
+
+    expect(result.accepted).toBe(1);
+    expect(result.events[0].scope).toMatchObject({
+      senderId: "8480568759",
+      channelClass: "dm",
+      threadId: "agent:main:thread",
+      resourceId: "agent:main:resource",
+    });
+    expect(result.events[0].scope?.ignored).toBeUndefined();
+    expect(result.events[0].scope?.dropped).toBeUndefined();
   });
 
   it("rejects malformed task and agent ids", async () => {
