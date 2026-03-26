@@ -55,7 +55,11 @@ export {
   normalizeSecretInputString,
 } from "./secret-input.js";
 export { createDedupeCache } from "../infra/dedupe.js";
-export { installRequestBodyLimitGuard, readJsonBodyWithLimit } from "../infra/http-body.js";
+export {
+  installRequestBodyLimitGuard,
+  readJsonBodyWithLimit,
+  readRequestBodyWithLimit,
+} from "../infra/http-body.js";
 export { fetchWithSsrFGuard } from "../infra/net/fetch-guard.js";
 export { resolveAgentOutboundIdentity } from "../infra/outbound/identity.js";
 export type { OutboundIdentity } from "../infra/outbound/identity.js";

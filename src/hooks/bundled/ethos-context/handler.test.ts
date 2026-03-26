@@ -213,17 +213,18 @@ describe("ethos-context hook", () => {
     expect(JSON.stringify(payload)).not.toContain("should-never-be-exposed");
   });
 
-  it("falls back to thread-only scoping when canonical resource resolution is unavailable", async () => {
+  it("falls back to channel-scoped resource ids when canonical resource resolution is unavailable", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
       json: async () => ({
         results: [
           {
-            id: "thread-match",
-            content: "Scoped by thread only",
+            id: "scoped-match",
+            content: "Scoped by channel sender fallback",
             createdAt: "1710000003000",
             metadata: {
+              resourceId: "telegram:9999999999",
               threadId: "agent:main:main",
             },
             retrieval: {
@@ -231,11 +232,12 @@ describe("ethos-context hook", () => {
             },
           },
           {
-            id: "thread-miss",
+            id: "scoped-miss",
             content: "Should be dropped",
             createdAt: "1710000004000",
             metadata: {
-              threadId: "agent:main:other",
+              resourceId: "telegram:someone-else",
+              threadId: "agent:main:main",
             },
             retrieval: {
               score: 0.87,
@@ -252,15 +254,16 @@ describe("ethos-context hook", () => {
 
     const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
     const requestBody = JSON.parse(request.body as string) as Record<string, unknown>;
-    expect(requestBody.resourceId).toBeUndefined();
-    expect(requestBody.threadId).toBe("agent:main:main");
+    expect(requestBody.resourceId).toBe("telegram:9999999999");
+    expect(requestBody.threadId).toBeUndefined();
 
     const payload = extractPrependPayload(
       String((event.context as { prependContext?: unknown }).prependContext),
     );
     expect(payload.memories).toEqual([
       expect.objectContaining({
-        id: "thread-match",
+        id: "scoped-match",
+        resource_id: "telegram:9999999999",
         thread_id: "agent:main:main",
       }),
     ]);

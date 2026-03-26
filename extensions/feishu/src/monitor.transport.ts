@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import {
   applyBasicWebhookRequestGuards,
-  readJsonBodyWithLimit,
+  readRequestBodyWithLimit,
   type RuntimeEnv,
   installRequestBodyLimitGuard,
 } from "../runtime-api.js";
@@ -50,7 +50,7 @@ function buildFeishuWebhookEnvelope(
 
 function isFeishuWebhookSignatureValid(params: {
   headers: http.IncomingHttpHeaders;
-  payload: Record<string, unknown>;
+  rawBody: string;
   encryptKey?: string;
 }): boolean {
   const encryptKey = params.encryptKey?.trim();
@@ -70,7 +70,7 @@ function isFeishuWebhookSignatureValid(params: {
 
   const computedSignature = crypto
     .createHash("sha256")
-    .update(timestamp + nonce + encryptKey + JSON.stringify(params.payload))
+    .update(timestamp + nonce + encryptKey + params.rawBody)
     .digest("hex");
   return timingSafeEqualString(computedSignature, signature);
 }
@@ -185,21 +185,11 @@ export async function monitorWebhook({
 
     void (async () => {
       try {
-        const bodyResult = await readJsonBodyWithLimit(req, {
+        const rawBody = await readRequestBodyWithLimit(req, {
           maxBytes: FEISHU_WEBHOOK_MAX_BODY_BYTES,
           timeoutMs: FEISHU_WEBHOOK_BODY_TIMEOUT_MS,
         });
         if (guard.isTripped() || res.writableEnded) {
-          return;
-        }
-        if (!bodyResult.ok) {
-          if (bodyResult.code === "INVALID_JSON") {
-            respondText(res, 400, "Invalid JSON");
-          }
-          return;
-        }
-        if (!isFeishuWebhookPayload(bodyResult.value)) {
-          respondText(res, 400, "Invalid JSON");
           return;
         }
 
@@ -207,7 +197,7 @@ export async function monitorWebhook({
         if (
           !isFeishuWebhookSignatureValid({
             headers: req.headers,
-            payload: bodyResult.value,
+            rawBody,
             encryptKey: account.encryptKey,
           })
         ) {
@@ -215,7 +205,25 @@ export async function monitorWebhook({
           return;
         }
 
-        const { isChallenge, challenge } = Lark.generateChallenge(bodyResult.value, {
+        const trimmedBody = rawBody.trim();
+        if (!trimmedBody) {
+          respondText(res, 400, "Invalid JSON");
+          return;
+        }
+
+        let parsedBody: unknown;
+        try {
+          parsedBody = JSON.parse(trimmedBody);
+        } catch {
+          respondText(res, 400, "Invalid JSON");
+          return;
+        }
+        if (!isFeishuWebhookPayload(parsedBody)) {
+          respondText(res, 400, "Invalid JSON");
+          return;
+        }
+
+        const { isChallenge, challenge } = Lark.generateChallenge(parsedBody, {
           encryptKey: account.encryptKey ?? "",
         });
         if (isChallenge) {
@@ -225,10 +233,9 @@ export async function monitorWebhook({
           return;
         }
 
-        const value = await eventDispatcher.invoke(
-          buildFeishuWebhookEnvelope(req, bodyResult.value),
-          { needCheck: false },
-        );
+        const value = await eventDispatcher.invoke(buildFeishuWebhookEnvelope(req, parsedBody), {
+          needCheck: false,
+        });
         if (!res.headersSent) {
           res.statusCode = 200;
           res.setHeader("Content-Type", "application/json; charset=utf-8");

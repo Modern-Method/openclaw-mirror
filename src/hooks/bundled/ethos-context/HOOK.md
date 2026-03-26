@@ -58,16 +58,16 @@ This hook is **disabled by default**. Enable it explicitly with `hooks.internal.
 The hook only runs when `channelId` is present and the sender can be scoped to either:
 
 - a canonical `resourceId` resolved from `session.identityLinks`, `channelId`, and `senderId`
+- a channel-scoped sender fallback resource id (`<channelId>:<senderId>`) when no canonical identity link exists
 - an owner canonical identity for direct-owner DMs when `senderIsOwner` is true
-- otherwise, a `threadId` fallback when `senderId` is present but canonical resolution is unavailable
 
 It sends scoped search filters in the request body:
 
 - `query`
 - `limit`
 - `agentId`
-- `resourceId` when canonical identity resolution succeeds
-- `threadId` (session key) only when `resourceId` is unavailable
+- `resourceId` resolved from canonical identity, or the channel-scoped sender fallback when sender identity is known
+- `threadId` (session key) only for legacy/fallback paths where no `resourceId` can be derived
 
 Client-side scope hardening is also applied before injection:
 

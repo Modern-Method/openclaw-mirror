@@ -21,9 +21,9 @@ vi.mock("./runtime.js", () => createFeishuRuntimeMockModule());
 
 import { monitorFeishuProvider, stopFeishuMonitor } from "./monitor.js";
 
-function signFeishuPayload(params: {
+function signFeishuRawBody(params: {
   encryptKey: string;
-  payload: Record<string, unknown>;
+  rawBody: string;
   timestamp?: string;
   nonce?: string;
 }): Record<string, string> {
@@ -31,7 +31,7 @@ function signFeishuPayload(params: {
   const nonce = params.nonce ?? "nonce-test";
   const signature = crypto
     .createHash("sha256")
-    .update(timestamp + nonce + params.encryptKey + JSON.stringify(params.payload))
+    .update(timestamp + nonce + params.encryptKey + params.rawBody)
     .digest("hex");
   return {
     "content-type": "application/json",
@@ -39,6 +39,20 @@ function signFeishuPayload(params: {
     "x-lark-request-nonce": nonce,
     "x-lark-signature": signature,
   };
+}
+
+function signFeishuPayload(params: {
+  encryptKey: string;
+  payload: Record<string, unknown>;
+  timestamp?: string;
+  nonce?: string;
+}): Record<string, string> {
+  return signFeishuRawBody({
+    encryptKey: params.encryptKey,
+    rawBody: JSON.stringify(params.payload),
+    timestamp: params.timestamp,
+    nonce: params.nonce,
+  });
 }
 
 function encryptFeishuPayload(encryptKey: string, payload: Record<string, unknown>): string {
@@ -142,13 +156,13 @@ describe("Feishu webhook signed-request e2e", () => {
     );
   });
 
-  it("returns 400 for invalid json before invoking the sdk", async () => {
+  it("rejects unsigned invalid json with 401 before parsing", async () => {
     probeFeishuMock.mockResolvedValue({ ok: true, botOpenId: "bot_open_id" });
 
     await withRunningWebhookMonitor(
       {
-        accountId: "invalid-json",
-        path: "/hook-e2e-invalid-json",
+        accountId: "invalid-json-unsigned",
+        path: "/hook-e2e-invalid-json-unsigned",
         verificationToken: "verify_token",
         encryptKey: "encrypt_key",
       },
@@ -158,6 +172,31 @@ describe("Feishu webhook signed-request e2e", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: "{not-json",
+        });
+
+        expect(response.status).toBe(401);
+        expect(await response.text()).toBe("Invalid signature");
+      },
+    );
+  });
+
+  it("returns 400 for signed invalid json before invoking the sdk", async () => {
+    probeFeishuMock.mockResolvedValue({ ok: true, botOpenId: "bot_open_id" });
+
+    await withRunningWebhookMonitor(
+      {
+        accountId: "invalid-json-signed",
+        path: "/hook-e2e-invalid-json-signed",
+        verificationToken: "verify_token",
+        encryptKey: "encrypt_key",
+      },
+      monitorFeishuProvider,
+      async (url) => {
+        const rawBody = "{not-json";
+        const response = await fetch(url, {
+          method: "POST",
+          headers: signFeishuRawBody({ encryptKey: "encrypt_key", rawBody }),
+          body: rawBody,
         });
 
         expect(response.status).toBe(400);
@@ -180,6 +219,31 @@ describe("Feishu webhook signed-request e2e", () => {
       async (url) => {
         const payload = { type: "url_verification", challenge: "challenge-token" };
         const response = await postSignedPayload(url, payload);
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ challenge: "challenge-token" });
+      },
+    );
+  });
+
+  it("accepts valid signatures for non-canonical raw JSON bodies", async () => {
+    probeFeishuMock.mockResolvedValue({ ok: true, botOpenId: "bot_open_id" });
+
+    await withRunningWebhookMonitor(
+      {
+        accountId: "signed-raw-body",
+        path: "/hook-e2e-signed-raw-body",
+        verificationToken: "verify_token",
+        encryptKey: "encrypt_key",
+      },
+      monitorFeishuProvider,
+      async (url) => {
+        const rawBody = '{\n  "challenge": "challenge-token",\n  "type": "url_verification"\n}';
+        const response = await fetch(url, {
+          method: "POST",
+          headers: signFeishuRawBody({ encryptKey: "encrypt_key", rawBody }),
+          body: rawBody,
+        });
 
         expect(response.status).toBe(200);
         await expect(response.json()).resolves.toEqual({ challenge: "challenge-token" });

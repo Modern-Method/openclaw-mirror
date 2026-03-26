@@ -204,6 +204,37 @@ describe("task ledger", () => {
     expect(repairedSnapshot.lastEventId).toBe("evt-manual-1");
   });
 
+  it("repairs snapshot content drift even when lastEventId matches", async () => {
+    const stateDir = await createStateDir();
+
+    const initial = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Drift-safe snapshot", state: "todo" },
+        },
+      ],
+    });
+
+    const snapshotPath = path.join(stateDir, "shared", "task-ledger", "snapshot.json");
+    const staleSnapshot = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as {
+      tasks: Array<{ state: string }>;
+      lastEventId?: string;
+    };
+    staleSnapshot.tasks[0].state = "blocked";
+    await fs.writeFile(snapshotPath, `${JSON.stringify(staleSnapshot, null, 2)}\n`, "utf8");
+
+    const repaired = await readTaskLedgerSnapshot({ stateDir });
+    const repairedOnDisk = await readSnapshotFile(stateDir);
+
+    expect(initial.snapshot.lastEventId).toBe(staleSnapshot.lastEventId);
+    expect(repaired.lastEventId).toBe(staleSnapshot.lastEventId);
+    expect(repaired.tasks[0]).toMatchObject({ id: "task-1", state: "todo" });
+    expect(repairedOnDisk.tasks[0]).toMatchObject({ id: "task-1", state: "todo" });
+  });
+
   it("publishes against the log, not a stale snapshot cache", async () => {
     const stateDir = await createStateDir();
 

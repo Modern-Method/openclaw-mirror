@@ -120,6 +120,10 @@ export function buildTaskLedgerAgentHeartbeatFromLifecycleEvent(
   if (!status || !summary) {
     return null;
   }
+  const tsValue = new Date(evt.ts);
+  if (Number.isNaN(tsValue.getTime())) {
+    return null;
+  }
   return {
     entity: "agent",
     kind: "heartbeat",
@@ -149,7 +153,7 @@ export function buildTaskLedgerAgentHeartbeatFromLifecycleEvent(
           : {}),
       },
     },
-    ts: new Date(evt.ts).toISOString(),
+    ts: tsValue.toISOString(),
     idempotencyKey: buildLifecycleIdempotencyKey(evt, agentId),
   };
 }

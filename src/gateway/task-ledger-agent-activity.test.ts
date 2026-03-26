@@ -124,4 +124,23 @@ describe("task-ledger agent activity", () => {
     expect(publish).not.toHaveBeenCalled();
     expect(broadcast).not.toHaveBeenCalled();
   });
+
+  it("drops invalid lifecycle timestamps instead of throwing", async () => {
+    const broadcast = vi.fn();
+    const publish = vi.fn().mockResolvedValue({ accepted: 0, events: [], snapshot: {} as never });
+    const listener = createTaskLedgerAgentActivityListener({
+      broadcast,
+      publish,
+      resolveAgentId: () => "forge",
+    });
+
+    listener({
+      ...makeLifecycleEvent("start"),
+      ts: Number.NaN,
+    });
+    await Promise.resolve();
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
 });

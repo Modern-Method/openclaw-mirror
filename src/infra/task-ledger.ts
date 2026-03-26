@@ -686,7 +686,19 @@ function shouldRewriteSnapshot(
   if (!canonical.lastEventId) {
     return cached.tasks.length > 0 || cached.agents.length > 0 || cached.recentEvents.length > 0;
   }
-  return false;
+
+  // When the latest event id matches, still repair on-disk drift/corruption in the projection.
+  const cachedProjection = stableStringify({
+    tasks: cached.tasks,
+    agents: cached.agents,
+    recentEvents: cached.recentEvents,
+  });
+  const canonicalProjection = stableStringify({
+    tasks: canonical.tasks,
+    agents: canonical.agents,
+    recentEvents: canonical.recentEvents,
+  });
+  return cachedProjection !== canonicalProjection;
 }
 
 async function writeSnapshotFile(snapshot: TaskLedgerSnapshot) {
