@@ -3,6 +3,7 @@ import {
   readTaskLedgerEvents,
   readTaskLedgerSnapshot,
   publishTaskLedgerEvents,
+  TaskLedgerPublishInputError,
 } from "../../infra/task-ledger.js";
 import { ErrorCodes, errorShape } from "../protocol/index.js";
 import type { GatewayRequestHandlers } from "./types.js";
@@ -99,11 +100,12 @@ export const tasksHandlers: GatewayRequestHandlers = {
       }
       respond(true, result, undefined);
     } catch (error) {
+      const isInvalidRequest = error instanceof TaskLedgerPublishInputError;
       respond(
         false,
         undefined,
         errorShape(
-          ErrorCodes.INVALID_REQUEST,
+          isInvalidRequest ? ErrorCodes.INVALID_REQUEST : ErrorCodes.UNAVAILABLE,
           error instanceof Error ? error.message : String(error),
         ),
       );

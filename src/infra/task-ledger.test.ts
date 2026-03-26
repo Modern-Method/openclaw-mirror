@@ -967,7 +967,7 @@ describe("task ledger", () => {
           injectedCount: 0,
           injectedChars: 0,
           withheldCount: 0,
-          dependencyStatus: "none",
+          dependencyStatus: "ok",
           ts: "2026-03-15T07:22:00.000Z",
         },
       ],
@@ -982,6 +982,41 @@ describe("task ledger", () => {
     });
     expect(result.events[0].scope?.ignored).toBeUndefined();
     expect(result.events[0].scope?.dropped).toBeUndefined();
+  });
+
+  it("includes recall traces in agent-scoped event reads", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "recall",
+          kind: "trace",
+          sessionKey: "agent:forge:main",
+          agentId: "forge",
+          ran: true,
+          candidatesConsidered: 0,
+          injectedCount: 0,
+          injectedChars: 0,
+          withheldCount: 0,
+          dependencyStatus: "ok",
+          ts: "2026-03-15T07:23:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: { id: "forge", status: "running" },
+          ts: "2026-03-15T07:23:01.000Z",
+        },
+      ],
+    });
+
+    const events = await readTaskLedgerEvents({ stateDir, agentId: "forge" });
+
+    expect(events.some((event) => event.entity === "recall")).toBe(true);
+    expect(events.filter((event) => event.entity === "agent")).toHaveLength(1);
+    expect(events).toHaveLength(2);
   });
 
   it("rejects malformed task and agent ids", async () => {
@@ -1012,5 +1047,22 @@ describe("task ledger", () => {
         ],
       }),
     ).rejects.toThrow(/agent id must not contain whitespace/i);
+
+    await expect(
+      publishTaskLedgerEvents({
+        stateDir,
+        events: [
+          {
+            entity: "recall",
+            kind: "trace",
+            sessionKey: "agent:forge:main",
+            agentId: "forge",
+            ran: true,
+            dependencyStatus: "bogus-status" as never,
+            ts: "2026-03-15T07:24:00.000Z",
+          },
+        ],
+      }),
+    ).rejects.toThrow(/invalid recall dependencyStatus/i);
   });
 });

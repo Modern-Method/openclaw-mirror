@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as taskLedger from "../../infra/task-ledger.js";
 import { tasksHandlers } from "./tasks.js";
 import type { GatewayRequestContext } from "./types.js";
 
@@ -116,5 +117,53 @@ describe("tasks gateway handlers", () => {
       },
       undefined,
     );
+  });
+
+  it("returns INVALID_REQUEST for malformed task ledger events", async () => {
+    const publishRespond = vi.fn();
+    const context = makeContext();
+    const spy = vi.spyOn(taskLedger, "publishTaskLedgerEvents").mockRejectedValueOnce(
+      new taskLedger.TaskLedgerPublishInputError("bad event"),
+    );
+
+    await tasksHandlers["tasks.publish"]({
+      req: {} as never,
+      params: { events: [{ entity: "task", kind: "upsert", task: { id: "task-1", title: "A" } }] },
+      respond: publishRespond as never,
+      context,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expect(publishRespond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({ code: "INVALID_REQUEST", message: "bad event" }),
+    );
+    spy.mockRestore();
+  });
+
+  it("returns UNAVAILABLE for internal publish failures", async () => {
+    const publishRespond = vi.fn();
+    const context = makeContext();
+    const spy = vi.spyOn(taskLedger, "publishTaskLedgerEvents").mockRejectedValueOnce(
+      new Error("disk full"),
+    );
+
+    await tasksHandlers["tasks.publish"]({
+      req: {} as never,
+      params: { events: [{ entity: "task", kind: "upsert", task: { id: "task-1", title: "A" } }] },
+      respond: publishRespond as never,
+      context,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expect(publishRespond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({ code: "UNAVAILABLE", message: "disk full" }),
+    );
+    spy.mockRestore();
   });
 });

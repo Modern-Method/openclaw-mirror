@@ -18,6 +18,8 @@ const RECONCILE_ACTOR_ID = "task-ledger-reconciler";
 const RECONCILE_ACTOR_NAME = "Task ledger reconciler";
 const RECONCILE_IDEMPOTENCY_PREFIX = "reconcile";
 const RECONCILE_AGENT_STALE_MS = 15 * 60_000;
+
+export class TaskLedgerPublishInputError extends Error {}
 const taskLedgerLock = createAsyncLock();
 
 type TaskLedgerTaskPatch = Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">> & {
@@ -1238,10 +1240,14 @@ export async function readTaskLedgerEvents(
     if (options.taskId && record.entity !== "task") {
       return false;
     }
-    if (options.agentId && record.entity === "agent" && record.agentId !== options.agentId) {
+    if (
+      options.agentId &&
+      (record.entity === "agent" || record.entity === "recall") &&
+      record.agentId !== options.agentId
+    ) {
       return false;
     }
-    if (options.agentId && record.entity !== "agent") {
+    if (options.agentId && record.entity !== "agent" && record.entity !== "recall") {
       return false;
     }
     return true;
@@ -1414,6 +1420,25 @@ function normalizeNonNegativeInteger(value: unknown): number {
   return Math.max(0, Math.floor(value));
 }
 
+function normalizeDependencyStatus(
+  value: unknown,
+): "ok" | "timeout" | "error" | "skipped" {
+  if (value === undefined) {
+    return "ok";
+  }
+
+  if (
+    value === "ok" ||
+    value === "timeout" ||
+    value === "error" ||
+    value === "skipped"
+  ) {
+    return value;
+  }
+
+  throw new TaskLedgerPublishInputError("invalid recall dependencyStatus");
+}
+
 function normalizeRecallScope(value: unknown): Record<string, string> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -1466,12 +1491,7 @@ function normalizeRecallRecord(input: TaskLedgerRecallTraceInput): TaskLedgerRec
     ...(typeof input.withheldCount === "number"
       ? { withheldCount: normalizeNonNegativeInteger(input.withheldCount) }
       : {}),
-    dependencyStatus:
-      input.dependencyStatus === "timeout" ||
-      input.dependencyStatus === "error" ||
-      input.dependencyStatus === "skipped"
-        ? input.dependencyStatus
-        : "ok",
+    dependencyStatus: normalizeDependencyStatus(input.dependencyStatus),
     ...(normalizeIdempotencyKey(input.idempotencyKey)
       ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
       : {}),
@@ -1555,7 +1575,15 @@ export async function publishTaskLedgerEvents(params: {
     const accepted: TaskLedgerRecord[] = [];
 
     for (const event of params.events) {
-      const record = normalizePublishRecord(event, materialized.tasks);
+      let record: TaskLedgerRecord;
+      try {
+        record = normalizePublishRecord(event, materialized.tasks);
+      } catch (error) {
+        if (error instanceof Error) {
+          throw new TaskLedgerPublishInputError(error.message);
+        }
+        throw error;
+      }
       if (shouldSkipDuplicateRecord(record, materialized)) {
         continue;
       }

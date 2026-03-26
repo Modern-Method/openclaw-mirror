@@ -61,10 +61,25 @@ type BuiltContextBlock = {
   withheldCount: number;
 };
 
-const searchCircuitState: SearchCircuitState = {
-  failureTimestampsMs: [],
-  openUntilMs: 0,
-};
+const searchCircuitStateBySession: Map<string, SearchCircuitState> = new Map();
+
+function getSearchCircuitState(sessionKey: string): SearchCircuitState {
+  const existing = searchCircuitStateBySession.get(sessionKey);
+  if (existing) {
+    return existing;
+  }
+
+  const created: SearchCircuitState = {
+    failureTimestampsMs: [],
+    openUntilMs: 0,
+  };
+  searchCircuitStateBySession.set(sessionKey, created);
+  return created;
+}
+
+function normalizeSearchCircuitKey(params: { sessionKey?: string }): string {
+  return params.sessionKey?.trim() || "unknown";
+}
 
 function resolveOptionalString(value: unknown): string | undefined {
   if (typeof value !== "string") {
@@ -156,17 +171,7 @@ function resolveOwnerCanonicalIdentityKey(
   if (!identityLinks) {
     return undefined;
   }
-  const keys = Object.keys(identityLinks)
-    .map((key) => key.trim())
-    .filter(Boolean);
-  if (keys.length === 0) {
-    return undefined;
-  }
-  const preferred = ["owner", "michael"].find((key) => identityLinks[key]?.length);
-  if (preferred) {
-    return preferred;
-  }
-  return keys[0];
+  return ["owner", "michael"].find((key) => identityLinks[key]?.length);
 }
 
 function resolveSearchUrl(baseUrl: string): string | null {
@@ -430,40 +435,43 @@ function recordMatchesScope(params: {
 }): boolean {
   const expectedResourceId = normalizeScopeValue(params.resourceId);
   const recordResourceId = normalizeScopeValue(params.record.resourceId);
-  if (expectedResourceId && recordResourceId && recordResourceId !== expectedResourceId) {
-    return false;
+  if (expectedResourceId) {
+    if (!recordResourceId || recordResourceId !== expectedResourceId) {
+      return false;
+    }
   }
 
   const expectedThreadId = normalizeScopeValue(params.threadId);
-  if (expectedThreadId && normalizeScopeValue(params.record.threadId) !== expectedThreadId) {
-    return false;
+  const recordThreadId = normalizeScopeValue(params.record.threadId);
+  if (expectedThreadId) {
+    if (!recordThreadId || recordThreadId !== expectedThreadId) {
+      return false;
+    }
   }
 
   return true;
 }
 
-function pruneSearchFailures(nowMs: number): void {
+function pruneSearchFailures(state: SearchCircuitState, nowMs: number): void {
   const cutoff = nowMs - SEARCH_FAILURE_WINDOW_MS;
-  searchCircuitState.failureTimestampsMs = searchCircuitState.failureTimestampsMs.filter(
-    (failureMs) => failureMs >= cutoff,
-  );
+  state.failureTimestampsMs = state.failureTimestampsMs.filter((failureMs) => failureMs >= cutoff);
 }
 
-function isSearchCircuitOpen(nowMs: number): boolean {
-  if (searchCircuitState.openUntilMs <= nowMs) {
-    searchCircuitState.openUntilMs = 0;
+function isSearchCircuitOpen(state: SearchCircuitState, nowMs: number): boolean {
+  if (state.openUntilMs <= nowMs) {
+    state.openUntilMs = 0;
     return false;
   }
   return true;
 }
 
-function recordSearchFailure(nowMs: number): void {
-  pruneSearchFailures(nowMs);
-  searchCircuitState.failureTimestampsMs.push(nowMs);
+function recordSearchFailure(state: SearchCircuitState, nowMs: number): void {
+  pruneSearchFailures(state, nowMs);
+  state.failureTimestampsMs.push(nowMs);
 
-  if (searchCircuitState.failureTimestampsMs.length >= SEARCH_FAILURE_THRESHOLD) {
-    searchCircuitState.openUntilMs = nowMs + SEARCH_BREAKER_OPEN_MS;
-    searchCircuitState.failureTimestampsMs = [];
+  if (state.failureTimestampsMs.length >= SEARCH_FAILURE_THRESHOLD) {
+    state.openUntilMs = nowMs + SEARCH_BREAKER_OPEN_MS;
+    state.failureTimestampsMs = [];
     log.debug("Ethos context search circuit breaker opened", {
       openForMs: SEARCH_BREAKER_OPEN_MS,
       threshold: SEARCH_FAILURE_THRESHOLD,
@@ -471,9 +479,9 @@ function recordSearchFailure(nowMs: number): void {
   }
 }
 
-function recordSearchSuccess(): void {
-  searchCircuitState.failureTimestampsMs = [];
-  searchCircuitState.openUntilMs = 0;
+function recordSearchSuccess(state: SearchCircuitState): void {
+  state.failureTimestampsMs = [];
+  state.openUntilMs = 0;
 }
 
 async function postSearchWithTimeout(params: {
@@ -520,8 +528,16 @@ async function emitRecallTrace(params: {
   withheldCount?: number;
   dependencyStatus: RecallTraceDependencyStatus;
 }): Promise<void> {
-  const sessionKey = resolveOptionalString(params.sessionKey) ?? "unknown";
-  const agentId = resolveOptionalString(params.agentId) ?? "unknown";
+  const sessionKey = resolveOptionalString(params.sessionKey);
+  const agentId = resolveOptionalString(params.agentId);
+  if (!sessionKey || !agentId) {
+    log.warn("Skipping recall trace publish: missing session or agent identity", {
+      sessionKey,
+      agentId,
+      senderId: params.senderId,
+    });
+    return;
+  }
 
   try {
     await publishTaskLedgerEvents({
@@ -646,9 +662,10 @@ const ethosContextHook: HookHandler = async (event) => {
   const threadId = event.sessionKey;
 
   const nowMs = Date.now();
-  if (isSearchCircuitOpen(nowMs)) {
+  const circuitState = getSearchCircuitState(normalizeSearchCircuitKey({ sessionKey: threadId }));
+  if (isSearchCircuitOpen(circuitState, nowMs)) {
     log.debug("Ethos context search circuit breaker active; skipping injection", {
-      retryInMs: Math.max(0, searchCircuitState.openUntilMs - nowMs),
+      retryInMs: Math.max(0, circuitState.openUntilMs - nowMs),
     });
     await emitRecallTrace({
       sessionKey: event.sessionKey,
@@ -698,7 +715,7 @@ const ethosContextHook: HookHandler = async (event) => {
     });
 
     if (!searchResponse) {
-      recordSearchFailure(Date.now());
+      recordSearchFailure(circuitState, Date.now());
       clearInjectedContext();
       await emitRecallTrace({
         sessionKey: event.sessionKey,
@@ -713,7 +730,7 @@ const ethosContextHook: HookHandler = async (event) => {
       return;
     }
 
-    recordSearchSuccess();
+    recordSearchSuccess(circuitState);
 
     const scopedRecords = extractSearchRecords(searchResponse)
       .filter((record) =>
@@ -769,7 +786,7 @@ const ethosContextHook: HookHandler = async (event) => {
       dependencyStatus: "ok",
     });
   } catch (error) {
-    recordSearchFailure(Date.now());
+    recordSearchFailure(circuitState, Date.now());
     clearInjectedContext();
     const message = error instanceof Error ? error.message : String(error);
     log.debug("Ethos context request failed", { message });

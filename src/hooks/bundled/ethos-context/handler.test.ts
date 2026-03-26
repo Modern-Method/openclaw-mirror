@@ -326,6 +326,26 @@ describe("ethos-context hook", () => {
     expect((trace.scope as { senderId?: string }).senderId).toBeUndefined();
   });
 
+  it("does not pick an arbitrary canonical identity when owner fallback keys are absent", async () => {
+    const cfg = createConfig({ canaryAgents: ["main"] });
+    (cfg.session as { identityLinks?: Record<string, string[]> }).identityLinks = {
+      alex: ["telegram:1111111111"],
+      jordan: ["telegram:2222222222"],
+    };
+    const event = createScopedEvent(cfg, { senderId: undefined, senderIsOwner: true });
+
+    await handler(event);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((event.context as { prependContext?: unknown }).prependContext).toBeUndefined();
+    expect(getLastRecallTraceInput()).toMatchObject({
+      entity: "recall",
+      ran: false,
+      skippedReason: "missing_scope",
+      dependencyStatus: "skipped",
+    });
+  });
+
   it("skips injection when channelId is missing", async () => {
     const cfg = createConfig({ canaryAgents: ["main"] });
     const event = createScopedEvent(cfg, { channelId: undefined });
@@ -342,7 +362,7 @@ describe("ethos-context hook", () => {
     });
   });
 
-  it("publishes skip traces safely when session identity is incomplete", async () => {
+  it("skips recall trace publish when session identity is incomplete", async () => {
     const cfg = createConfig({ canaryAgents: ["main"] });
     const event = createScopedEvent(cfg, { channelId: undefined, agentId: undefined });
     (event as { sessionKey?: string }).sessionKey = "";
@@ -351,15 +371,8 @@ describe("ethos-context hook", () => {
     await expect(handler(event)).resolves.toBeUndefined();
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(getLastRecallTraceInput()).toMatchObject({
-      entity: "recall",
-      kind: "trace",
-      sessionKey: "unknown",
-      agentId: "main",
-      ran: false,
-      skippedReason: "missing_scope",
-      dependencyStatus: "skipped",
-    });
+    expect(publishTaskLedgerEventsMock).not.toHaveBeenCalled();
+    expect((event.context as { prependContext?: unknown }).prependContext).toBeUndefined();
   });
 
   it("obeys maxChars budget when building prependContext", async () => {
@@ -468,7 +481,7 @@ describe("ethos-context hook", () => {
     expect(prependContext).not.toContain("Top memories:");
   });
 
-  it("keeps records with missing scope fields when otherwise in-scope", async () => {
+  it("filters out records that fail strict resource scope checks", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -485,7 +498,7 @@ describe("ethos-context hook", () => {
           },
           {
             id: "missing-scope",
-            content: "missing scope metadata should be allowed",
+            content: "missing scope metadata should be dropped",
             metadata: {
               threadId: "agent:main:main",
             },
@@ -500,18 +513,21 @@ describe("ethos-context hook", () => {
 
     await handler(event);
 
-    const payload = extractPrependPayload(String((event.context as { prependContext?: unknown }).prependContext));
-    expect(payload.memories).toEqual([
-      {
-        text: "missing scope metadata should be allowed",
-      },
-    ]);
-
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const requestBody = JSON.parse(request.body as string) as Record<string, unknown>;
+    expect(requestBody).toEqual(
+      expect.objectContaining({
+        resourceId: "michael",
+        threadId: "agent:main:main",
+      }),
+    );
+    expect((event.context as { prependContext?: unknown }).prependContext).toBeUndefined();
     expect(getLastRecallTraceInput()).toMatchObject({
       entity: "recall",
       ran: true,
-      candidatesConsidered: 1,
-      injectedCount: 1,
+      candidatesConsidered: 0,
+      injectedCount: 0,
       dependencyStatus: "ok",
     });
   });
