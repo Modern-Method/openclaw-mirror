@@ -43,6 +43,7 @@ import {
   emitAgentEvent,
   registerAgentRunContext,
 } from "../infra/agent-events.js";
+import { resolveGitHeadPath } from "../infra/git-root.js";
 import { buildOutboundSessionContext } from "../infra/outbound/session-context.js";
 import { getRemoteSkillEligibility } from "../infra/skills-remote.js";
 import { normalizeAgentId } from "../routing/session-key.js";
@@ -127,6 +128,42 @@ const OVERRIDE_FIELDS_CLEARED_BY_DELETE: OverrideFieldClearedByDelete[] = [
 ];
 
 const OVERRIDE_VALUE_MAX_LENGTH = 256;
+
+function trimToUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+async function resolveWorkspaceBranch(workspaceDir: string): Promise<string | undefined> {
+  const headPath = resolveGitHeadPath(workspaceDir);
+  if (!headPath) {
+    return undefined;
+  }
+  let head = "";
+  try {
+    head = (await fs.readFile(headPath, "utf8")).trim();
+  } catch {
+    return undefined;
+  }
+  if (!head.startsWith("ref:")) {
+    return undefined;
+  }
+  const ref = head.replace(/^ref:\s*/i, "").trim();
+  const match = ref.match(/^refs\/heads\/(.+)$/u);
+  return trimToUndefined(match?.[1]);
+}
+
+function clearTaskLifecycleRunContext(runId: string) {
+  registerAgentRunContext(runId, {
+    lane: undefined,
+    currentTaskId: undefined,
+    worktree: undefined,
+    branch: undefined,
+  });
+}
 
 function containsControlCharacters(value: string): boolean {
   for (const char of value) {
@@ -671,6 +708,7 @@ async function prepareAgentCommandExecution(
     ensureBootstrapFiles: !agentCfg?.skipBootstrap,
   });
   const workspaceDir = workspace.dir;
+  const branch = await resolveWorkspaceBranch(workspaceDir);
   const runId = opts.runId?.trim() || sessionId;
   const acpManager = getAcpSessionManager();
   const acpResolution = sessionKey
@@ -700,6 +738,7 @@ async function prepareAgentCommandExecution(
     sessionAgentId,
     outboundSession,
     workspaceDir,
+    branch,
     agentDir,
     runId,
     acpManager,
@@ -732,6 +771,7 @@ async function agentCommandInternal(
     sessionAgentId,
     outboundSession,
     workspaceDir,
+    branch,
     agentDir,
     runId,
     acpManager,
@@ -761,6 +801,10 @@ async function agentCommandInternal(
       const startedAt = Date.now();
       registerAgentRunContext(runId, {
         sessionKey,
+        lane: opts.lane,
+        currentTaskId: opts.currentTaskId,
+        worktree: workspaceDir,
+        branch,
       });
       emitAgentEvent({
         runId,
@@ -827,6 +871,7 @@ async function agentCommandInternal(
           fallbackCode: "ACP_TURN_FAILED",
           fallbackMessage: "ACP turn failed before completion.",
         });
+        clearTaskLifecycleRunContext(runId);
         emitAgentEvent({
           runId,
           stream: "lifecycle",
@@ -839,6 +884,7 @@ async function agentCommandInternal(
         throw acpError;
       }
 
+      clearTaskLifecycleRunContext(runId);
       emitAgentEvent({
         runId,
         stream: "lifecycle",
@@ -902,6 +948,10 @@ async function agentCommandInternal(
       registerAgentRunContext(runId, {
         sessionKey,
         verboseLevel: resolvedVerboseLevel,
+        lane: opts.lane,
+        currentTaskId: opts.currentTaskId,
+        worktree: workspaceDir,
+        branch,
       });
     }
 
@@ -1227,6 +1277,7 @@ async function agentCommandInternal(
         if (stopReason && stopReason !== "end_turn") {
           console.error(`[agent] run ${runId} ended with stopReason=${stopReason}`);
         }
+        clearTaskLifecycleRunContext(runId);
         emitAgentEvent({
           runId,
           stream: "lifecycle",
@@ -1241,6 +1292,7 @@ async function agentCommandInternal(
       }
     } catch (err) {
       if (!lifecycleEnded) {
+        clearTaskLifecycleRunContext(runId);
         emitAgentEvent({
           runId,
           stream: "lifecycle",

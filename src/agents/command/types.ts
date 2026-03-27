@@ -80,6 +80,7 @@ export type AgentCommandOpts = {
   bestEffortDeliver?: boolean;
   abortSignal?: AbortSignal;
   lane?: string;
+  currentTaskId?: string;
   runId?: string;
   extraSystemPrompt?: string;
   internalEvents?: AgentInternalEvent[];

@@ -18,6 +18,7 @@ import { clearSessionStoreCacheForTest } from "../config/sessions.js";
 import * as sessionPathsModule from "../config/sessions/paths.js";
 import {
   emitAgentEvent,
+  getAgentRunContext,
   onAgentEvent,
   resetAgentEventsForTest,
   resetAgentRunContextForTest,
@@ -669,6 +670,68 @@ describe("agentCommand", () => {
 
       const matching = assistantEvents.filter((evt) => evt.text === "hello");
       expect(matching).toHaveLength(1);
+    });
+  });
+
+  it("emits explicit task context on start and explicit clears on terminal lifecycle events", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store);
+      let activeRunContext:
+        | ReturnType<typeof getAgentRunContext>
+        | undefined;
+
+      const lifecycleEvents: Array<{
+        phase?: string;
+        runContext?: Record<string, unknown>;
+      }> = [];
+      const stop = onAgentEvent((evt) => {
+        if (evt.stream !== "lifecycle") {
+          return;
+        }
+        lifecycleEvents.push({
+          phase: typeof evt.data?.phase === "string" ? evt.data.phase : undefined,
+          runContext:
+            evt.runContext && typeof evt.runContext === "object"
+              ? (evt.runContext as Record<string, unknown>)
+              : undefined,
+        });
+      });
+      vi.mocked(runEmbeddedPiAgent).mockImplementationOnce(async (params) => {
+        const runContext = getAgentRunContext(params.runId ?? "");
+        activeRunContext = runContext ? { ...runContext } : undefined;
+        return createDefaultAgentResult();
+      });
+
+      await agentCommand(
+        {
+          message: "hi",
+          sessionKey: "agent:main:task-context",
+          lane: "pinned",
+          currentTaskId: "task-42",
+        },
+        runtime,
+      );
+      stop();
+
+      const endEvent = [...lifecycleEvents].reverse().find((evt) => evt.phase === "end");
+
+      expect(activeRunContext).toMatchObject({
+        sessionKey: "agent:main:task-context",
+        lane: "pinned",
+        currentTaskId: "task-42",
+        worktree: path.join(home, "openclaw"),
+      });
+      expect(endEvent?.runContext).toMatchObject({
+        sessionKey: "agent:main:task-context",
+        lane: undefined,
+        currentTaskId: undefined,
+        worktree: undefined,
+        branch: undefined,
+      });
+      expect(Object.keys(endEvent?.runContext ?? {})).toEqual(
+        expect.arrayContaining(["lane", "currentTaskId", "worktree", "branch"]),
+      );
     });
   });
 
