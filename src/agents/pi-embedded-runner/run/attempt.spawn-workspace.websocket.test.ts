@@ -11,13 +11,13 @@ describe("openai websocket transport selection", () => {
     ).toBe(true);
   });
 
-  it("accepts the Codex responses transport pair", () => {
+  it("rejects the Codex responses transport pair until a provider-aware WS URL exists", () => {
     expect(
       shouldUseOpenAIWebSocketTransport({
         provider: "openai-codex",
         modelApi: "openai-codex-responses",
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("rejects mismatched OpenAI websocket transport pairs", () => {

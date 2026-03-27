@@ -35,10 +35,10 @@ export function shouldUseOpenAIWebSocketTransport(params: {
   provider: string;
   modelApi?: string | null;
 }): boolean {
-  return (
-    (params.modelApi === "openai-responses" && params.provider === "openai") ||
-    (params.modelApi === "openai-codex-responses" && params.provider === "openai-codex")
-  );
+  // The current OpenAI WS manager is hard-wired to OpenAI's public Responses
+  // websocket endpoint. Keep ChatGPT-backed Codex providers on HTTP until we
+  // have a provider-aware websocket URL resolver for openai-codex.
+  return params.modelApi === "openai-responses" && params.provider === "openai";
 }
 
 export function shouldAppendAttemptCacheTtl(params: {
