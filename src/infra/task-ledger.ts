@@ -856,16 +856,15 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
 
       const agent = materialized.agents.get(assignedAgent);
       const agentRecord = lastAgentRecordById.get(assignedAgent);
-      const agentRecordId = agentRecord?.id;
 
       if (!agent || !agentRecord) {
         queueTaskNote(
           task.id,
-          `Reconcile warning: task is in progress for assigned agent ${assignedAgent}, but no agent heartbeat is recorded. Verify whether work is still active or reassign the task.`,
+          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but no agent heartbeat is recorded. This usually means stale residue from earlier work; verify whether the task should remain in progress or be reassigned.`,
           buildReconcileIdempotencyKey("in-progress-agent-missing", [
             task.id,
-            taskRecordId,
             assignedAgent,
+            task.state,
           ]),
         );
         continue;
@@ -874,11 +873,11 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       if (agent.status === "idle") {
         queueTaskNote(
           task.id,
-          `Reconcile warning: task is in progress for assigned agent ${assignedAgent}, but the latest heartbeat reports the agent idle. Verify whether the task should pause or the agent context should be updated.`,
+          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but the latest heartbeat reports the agent idle. This usually means the task state or agent context was not cleaned up; verify whether the task should pause or the agent context should be updated.`,
           buildReconcileIdempotencyKey("in-progress-agent-idle", [
             task.id,
-            taskRecordId,
-            agentRecordId,
+            assignedAgent,
+            agent.status,
           ]),
         );
         continue;
@@ -889,11 +888,11 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       if (Number.isFinite(staleDeltaMs) && staleDeltaMs >= RECONCILE_AGENT_STALE_MS) {
         queueTaskNote(
           task.id,
-          `Reconcile warning: task is in progress for assigned agent ${assignedAgent}, but the latest heartbeat is stale (${agent.lastSeenAt}). Verify whether work is still active or refresh the agent task context.`,
+          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but the latest heartbeat is stale (${agent.lastSeenAt}). This looks like stale residue unless work is still active; verify whether the task should remain in progress or refresh the agent task context.`,
           buildReconcileIdempotencyKey("in-progress-agent-stale", [
             task.id,
-            taskRecordId,
-            agentRecordId,
+            assignedAgent,
+            "stale",
           ]),
           Number.isFinite(taskReferenceTsMs) ? new Date(taskReferenceTsMs).toISOString() : undefined,
         );
@@ -919,18 +918,17 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       source: "heartbeat",
     });
 
-    const taskRecord = lastSubstantiveTaskRecordById.get(task.id);
-    const taskRecordId = taskRecord?.id;
     const assignedAgent = trimToUndefined(task.assignedAgent);
 
     if (agent.status !== "idle" && (task.state === "backlog" || task.state === "todo")) {
       queueTaskNote(
         task.id,
-        `Reconcile warning: agent ${agent.id} reports active task context for this task (${agent.status}), but the task is still ${task.state}. Verify whether it should move to in progress or clear the stale agent context.`,
+        `Reconcile mismatch: agent ${agent.id} reports active task context for this task (${agent.status}), but the task is still ${task.state}. Move the task to in progress or clear the stale agent context.`,
         buildReconcileIdempotencyKey("active-context-task-not-started", [
           task.id,
-          taskRecordId,
-          agentRecord.id,
+          task.state,
+          agent.id,
+          agent.status,
         ]),
       );
     }
@@ -939,13 +937,13 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       queueTaskNote(
         task.id,
         assignedAgent
-          ? `Reconcile warning: agent ${agent.id} heartbeat claims this task as current work, but the task is assigned to ${assignedAgent}. Verify task ownership or clear stale heartbeat context.`
-          : `Reconcile warning: agent ${agent.id} heartbeat claims this task as current work, but the task is currently unassigned. Verify task ownership or clear stale heartbeat context.`,
+          ? `Reconcile mismatch: agent ${agent.id} heartbeat claims this task as current work, but the task is assigned to ${assignedAgent}. Fix task ownership or clear the stale heartbeat context.`
+          : `Reconcile mismatch: agent ${agent.id} heartbeat claims this task as current work, but the task is currently unassigned. Fix task ownership or clear the stale heartbeat context.`,
         buildReconcileIdempotencyKey("heartbeat-task-assignment-mismatch", [
           task.id,
-          taskRecordId,
-          agentRecord.id,
+          agent.id,
           assignedAgent ?? "unassigned",
+          task.state,
         ]),
       );
     }
@@ -967,12 +965,11 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     }
     queueTaskNote(
       task.id,
-      `Reconcile note: blocked task still belongs to ${assignedAgent}, but newer active work exists on ${activeWork.taskId}. Review whether this task is still blocked, should be reassigned, or can be reopened.`,
+      `Reconcile residue: blocked task still belongs to ${assignedAgent}, but newer active work exists on ${activeWork.taskId}. Review whether this task is still blocked, should be reassigned, or can be reopened.`,
       buildReconcileIdempotencyKey("blocked-task-superseded", [
         task.id,
-        blockedRecord?.id,
-        activeWork.referenceId,
-        activeWork.source,
+        assignedAgent,
+        activeWork.taskId,
       ]),
     );
   }

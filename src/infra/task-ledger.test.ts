@@ -691,10 +691,11 @@ describe("task ledger", () => {
       taskId: "task-1",
       actor: { type: "system", id: "task-ledger-reconciler" },
     });
+    expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile mismatch:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/still todo/i);
   });
 
-  it("emits reconcile evidence when an in-progress task is assigned to an idle agent", async () => {
+  it("emits reconcile residue when an in-progress task is assigned to an idle agent", async () => {
     const stateDir = await createStateDir();
 
     const result = await publishTaskLedgerEvents({
@@ -728,10 +729,72 @@ describe("task ledger", () => {
     const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
 
     expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/latest heartbeat reports the agent idle/i);
   });
 
-  it("emits reconcile evidence when an in-progress task is assigned to a stale agent heartbeat", async () => {
+  it("does not repeat reconcile residue for unchanged idle drift", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-1",
+            title: "Investigate drift",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T06:10:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "idle",
+            currentTaskId: "task-1",
+            summary: "Waiting",
+          },
+          ts: "2026-03-15T06:10:00.000Z",
+        },
+      ],
+    });
+
+    const replay = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "idle",
+            currentTaskId: "task-1",
+            summary: "Still waiting",
+          },
+          ts: "2026-03-15T06:11:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const reconcileEvents = taskEvents.filter(
+      (event) =>
+        event.entity === "task" &&
+        event.kind === "note" &&
+        event.actor.id === "task-ledger-reconciler",
+    );
+
+    expect(replay.accepted).toBe(1);
+    expect(reconcileEvents).toHaveLength(1);
+    expect(reconcileEvents[0]?.summary).toMatch(/^Reconcile residue:/);
+  });
+
+  it("emits reconcile residue when an in-progress task is assigned to a stale agent heartbeat", async () => {
     const stateDir = await createStateDir();
 
     const result = await publishTaskLedgerEvents({
@@ -765,6 +828,7 @@ describe("task ledger", () => {
     const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
 
     expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/latest heartbeat is stale/i);
     expect(taskEvents.at(-1)?.summary).toContain("2026-03-15T06:20:00.000Z");
   });
@@ -809,10 +873,11 @@ describe("task ledger", () => {
     const blockedTaskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
 
     expect(result.accepted).toBe(4);
+    expect(blockedTaskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
     expect(blockedTaskEvents.at(-1)?.summary).toMatch(/newer active work exists on task-2/i);
   });
 
-  it("emits reconcile evidence when heartbeat task context disagrees with task ownership", async () => {
+  it("emits reconcile mismatch when heartbeat task context disagrees with task ownership", async () => {
     const stateDir = await createStateDir();
 
     const result = await publishTaskLedgerEvents({
@@ -841,6 +906,7 @@ describe("task ledger", () => {
     const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
 
     expect(result.accepted).toBe(3);
+    expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile mismatch:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/task is assigned to atlas/i);
   });
 

@@ -169,7 +169,6 @@ describe("task lifecycle publisher", () => {
       "state_changed",
       "note",
       "note",
-      "note",
       "blocked",
       "qa",
       "state_changed",
@@ -182,17 +181,15 @@ describe("task lifecycle publisher", () => {
         event.idempotencyKey.startsWith("reconcile:in-progress-agent-missing:")
     );
 
-    expect(reconcileNotes).toHaveLength(2);
+    expect(reconcileNotes).toHaveLength(1);
     expect(reconcileNotes.map((event) => event.summary)).toEqual([
-      "Reconcile warning: task is in progress for assigned agent forge, but no agent heartbeat is recorded. Verify whether work is still active or reassign the task.",
-      "Reconcile warning: task is in progress for assigned agent forge, but no agent heartbeat is recorded. Verify whether work is still active or reassign the task.",
+      "Reconcile residue: task is still marked in progress for assigned agent forge, but no agent heartbeat is recorded. This usually means stale residue from earlier work; verify whether the task should remain in progress or be reassigned.",
     ]);
 
     expect(events.map((event) => event.idempotencyKey)).toEqual([
       "task-1:start:run-1",
       expect.stringMatching(/^reconcile:in-progress-agent-missing:/),
       "task-1:note:run-1",
-      expect.stringMatching(/^reconcile:in-progress-agent-missing:/),
       "task-1:block:run-1",
       "task-1:qa:run-1",
       "task-1:done:run-1",
