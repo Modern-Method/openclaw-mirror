@@ -22,6 +22,15 @@ describe("resolveContinueUntilTerminalState", () => {
     ).toBeUndefined();
   });
 
+  it("keeps tool-call checkpoints non-terminal even when approval prompting was used", () => {
+    expect(
+      resolveContinueUntilTerminalState({
+        stopReason: "tool_calls",
+        didSendDeterministicApprovalPrompt: true,
+      }),
+    ).toBeUndefined();
+  });
+
   it("treats image-size errors as blocked by input", () => {
     expect(
       resolveContinueUntilTerminalState({

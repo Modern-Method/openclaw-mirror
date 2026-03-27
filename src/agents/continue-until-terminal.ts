@@ -15,11 +15,11 @@ export function resolveContinueUntilTerminalState(
   if (params.unsafeToProceed) {
     return "unsafe_to_proceed";
   }
-  if (params.didSendDeterministicApprovalPrompt) {
-    return "blocked_by_input";
-  }
   if (params.stopReason === "tool_calls") {
     return undefined;
+  }
+  if (params.didSendDeterministicApprovalPrompt) {
+    return "blocked_by_input";
   }
   switch (params.errorKind) {
     case "image_size":
