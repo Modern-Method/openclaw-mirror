@@ -1,5 +1,6 @@
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
+import { resolveContinueUntilTerminalState } from "./continue-until-terminal.js";
 import {
   buildApiErrorObservationFields,
   buildTextObservationFields,
@@ -75,6 +76,9 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
         phase: "error",
         error: safeErrorText,
         endedAt: Date.now(),
+        terminalState: resolveContinueUntilTerminalState({
+          errorKind: "retry_limit",
+        }),
       },
     });
     void ctx.params.onAgentEvent?.({
@@ -82,6 +86,9 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       data: {
         phase: "error",
         error: safeErrorText,
+        terminalState: resolveContinueUntilTerminalState({
+          errorKind: "retry_limit",
+        }),
       },
     });
   } else {
@@ -92,11 +99,19 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       data: {
         phase: "end",
         endedAt: Date.now(),
+        terminalState: resolveContinueUntilTerminalState({
+          didSendDeterministicApprovalPrompt: ctx.state.deterministicApprovalPromptSent,
+        }),
       },
     });
     void ctx.params.onAgentEvent?.({
       stream: "lifecycle",
-      data: { phase: "end" },
+      data: {
+        phase: "end",
+        terminalState: resolveContinueUntilTerminalState({
+          didSendDeterministicApprovalPrompt: ctx.state.deterministicApprovalPromptSent,
+        }),
+      },
     });
   }
 

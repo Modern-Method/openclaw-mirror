@@ -1101,6 +1101,7 @@ describe("runReplyAgent claude-cli routing", () => {
     const runId = "00000000-0000-0000-0000-000000000001";
     const randomSpy = vi.spyOn(crypto, "randomUUID").mockReturnValue(runId);
     const lifecyclePhases: string[] = [];
+    const lifecycleTerminalStates: string[] = [];
     const unsubscribe = onAgentEvent((evt) => {
       if (evt.runId !== runId) {
         return;
@@ -1111,6 +1112,10 @@ describe("runReplyAgent claude-cli routing", () => {
       const phase = evt.data?.phase;
       if (typeof phase === "string") {
         lifecyclePhases.push(phase);
+      }
+      const terminalState = evt.data?.terminalState;
+      if (typeof terminalState === "string") {
+        lifecycleTerminalStates.push(terminalState);
       }
     });
     runCliAgentMock.mockResolvedValueOnce({
@@ -1130,6 +1135,7 @@ describe("runReplyAgent claude-cli routing", () => {
     expect(runCliAgentMock).toHaveBeenCalledTimes(1);
     expect(runEmbeddedPiAgentMock).not.toHaveBeenCalled();
     expect(lifecyclePhases).toEqual(["start", "end"]);
+    expect(lifecycleTerminalStates).toEqual(["done"]);
     expect(result).toMatchObject({ text: "ok" });
   });
 });

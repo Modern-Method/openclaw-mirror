@@ -1,4 +1,5 @@
 import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
+import type { ContinueUntilTerminalState } from "../continue-until-terminal.js";
 import type { MessagingToolSend } from "../pi-embedded-messaging.js";
 
 export type EmbeddedPiAgentMeta = {
@@ -35,6 +36,7 @@ export type EmbeddedPiRunMeta = {
   agentMeta?: EmbeddedPiAgentMeta;
   aborted?: boolean;
   systemPromptReport?: SessionSystemPromptReport;
+  terminalState?: ContinueUntilTerminalState;
   error?: {
     kind:
       | "context_overflow"

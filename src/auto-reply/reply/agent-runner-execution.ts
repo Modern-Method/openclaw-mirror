@@ -7,6 +7,7 @@ import {
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import { runCliAgent } from "../../agents/cli-runner.js";
 import { getCliSessionId } from "../../agents/cli-session.js";
+import { resolveContinueUntilTerminalState } from "../../agents/continue-until-terminal.js";
 import { runWithModelFallback, isFallbackSummaryError } from "../../agents/model-fallback.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import {
@@ -327,6 +328,7 @@ export async function runAgentTurnWithFallback(params: {
                     phase: "end",
                     startedAt,
                     endedAt: Date.now(),
+                    terminalState: resolveContinueUntilTerminalState(),
                   },
                 });
                 lifecycleTerminalEmitted = true;
@@ -341,6 +343,9 @@ export async function runAgentTurnWithFallback(params: {
                     startedAt,
                     endedAt: Date.now(),
                     error: String(err),
+                    terminalState: resolveContinueUntilTerminalState({
+                      errorKind: "retry_limit",
+                    }),
                   },
                 });
                 lifecycleTerminalEmitted = true;
@@ -357,6 +362,9 @@ export async function runAgentTurnWithFallback(params: {
                       startedAt,
                       endedAt: Date.now(),
                       error: "CLI run completed without lifecycle terminal event",
+                      terminalState: resolveContinueUntilTerminalState({
+                        errorKind: "retry_limit",
+                      }),
                     },
                   });
                 }

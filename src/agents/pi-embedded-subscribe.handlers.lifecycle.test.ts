@@ -73,6 +73,7 @@ describe("handleAgentEnd", () => {
       data: {
         phase: "error",
         error: "LLM request failed: connection refused by the provider endpoint.",
+        terminalState: "repeated_failure",
       },
     });
   });
@@ -152,6 +153,7 @@ describe("handleAgentEnd", () => {
       data: {
         phase: "error",
         error: "x-api-key: ***",
+        terminalState: "repeated_failure",
       },
     });
   });
@@ -163,6 +165,37 @@ describe("handleAgentEnd", () => {
 
     expect(ctx.log.warn).not.toHaveBeenCalled();
     expect(ctx.log.debug).toHaveBeenCalledWith("embedded run agent end: runId=run-1 isError=false");
+  });
+
+  it("marks a clean run end as done", () => {
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(undefined, { onAgentEvent });
+
+    handleAgentEnd(ctx);
+
+    expect(onAgentEvent).toHaveBeenCalledWith({
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        terminalState: "done",
+      },
+    });
+  });
+
+  it("marks deterministic approval prompts as blocked by input", () => {
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(undefined, { onAgentEvent });
+    ctx.state.deterministicApprovalPromptSent = true;
+
+    handleAgentEnd(ctx);
+
+    expect(onAgentEvent).toHaveBeenCalledWith({
+      stream: "lifecycle",
+      data: {
+        phase: "end",
+        terminalState: "blocked_by_input",
+      },
+    });
   });
 
   it("flushes orphaned tool media as a media-only block reply", () => {

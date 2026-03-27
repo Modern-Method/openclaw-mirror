@@ -28,6 +28,7 @@ import {
   evaluateContextWindowGuard,
   resolveContextWindowInfo,
 } from "../context-window-guard.js";
+import { resolveContinueUntilTerminalState } from "../continue-until-terminal.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
 import {
   coerceToFailoverError,
@@ -914,6 +915,9 @@ export async function runEmbeddedPiAgent(
                   lastRunPromptUsage,
                   lastTurnTotal,
                 }),
+                terminalState: resolveContinueUntilTerminalState({
+                  errorKind: "retry_limit",
+                }),
                 error: { kind: "retry_limit", message },
               },
             };
@@ -1375,6 +1379,9 @@ export async function runEmbeddedPiAgent(
                   lastTurnTotal,
                 }),
                 systemPromptReport: attempt.systemPromptReport,
+                terminalState: resolveContinueUntilTerminalState({
+                  errorKind: kind,
+                }),
                 error: { kind, message: errorText },
               },
             };
@@ -1419,6 +1426,9 @@ export async function runEmbeddedPiAgent(
                     lastTurnTotal,
                   }),
                   systemPromptReport: attempt.systemPromptReport,
+                  terminalState: resolveContinueUntilTerminalState({
+                    errorKind: "role_ordering",
+                  }),
                   error: { kind: "role_ordering", message: errorText },
                 },
               };
@@ -1451,6 +1461,9 @@ export async function runEmbeddedPiAgent(
                     lastTurnTotal,
                   }),
                   systemPromptReport: attempt.systemPromptReport,
+                  terminalState: resolveContinueUntilTerminalState({
+                    errorKind: "image_size",
+                  }),
                   error: { kind: "image_size", message: errorText },
                 },
               };
@@ -1715,6 +1728,9 @@ export async function runEmbeddedPiAgent(
                 agentMeta,
                 aborted,
                 systemPromptReport: attempt.systemPromptReport,
+                terminalState: resolveContinueUntilTerminalState({
+                  errorKind: "retry_limit",
+                }),
               },
               didSendViaMessagingTool: attempt.didSendViaMessagingTool,
               didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
@@ -1790,6 +1806,9 @@ export async function runEmbeddedPiAgent(
                   agentMeta,
                   aborted,
                   systemPromptReport: attempt.systemPromptReport,
+                  terminalState: resolveContinueUntilTerminalState({
+                    errorKind: "retry_limit",
+                  }),
                 },
                 didSendViaMessagingTool: attempt.didSendViaMessagingTool,
                 didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
@@ -1824,6 +1843,10 @@ export async function runEmbeddedPiAgent(
               agentMeta,
               aborted,
               systemPromptReport: attempt.systemPromptReport,
+              terminalState: resolveContinueUntilTerminalState({
+                stopReason: attempt.clientToolCall ? "tool_calls" : undefined,
+                didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
+              }),
               // Handle client tool calls (OpenResponses hosted tools)
               // Propagate the LLM stop reason so callers (lifecycle events,
               // ACP bridge) can distinguish end_turn from max_tokens.
