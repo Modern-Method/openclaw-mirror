@@ -193,6 +193,17 @@ function compactRecord(input: Record<string, unknown>): Record<string, unknown> 
   return output;
 }
 
+function compactStringRecord(input: Record<string, string | undefined>): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
 function asObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -430,7 +441,7 @@ function buildContextBlockResult(params: {
 
 function recordMatchesScope(params: {
   record: EthosSearchRecord;
-  resourceId: string;
+  resourceId?: string;
   threadId?: string;
 }): boolean {
   const expectedResourceId = normalizeScopeValue(params.resourceId);
@@ -497,7 +508,7 @@ async function postSearchWithTimeout(params: {
   try {
     const response = await fetch(params.url, {
       method: "POST",
-      headers: compactRecord({
+      headers: compactStringRecord({
         "content-type": "application/json",
         authorization: params.apiKey ? `Bearer ${params.apiKey}` : undefined,
       }),

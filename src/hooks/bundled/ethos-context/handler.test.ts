@@ -257,7 +257,7 @@ describe("ethos-context hook", () => {
       created_at: "1710000000000",
       source: "chat_history",
     });
-    expect(Object.keys(memories[0] ?? {}).sort()).toEqual(["created_at", "source", "text"]);
+    expect(Object.keys(memories[0] ?? {}).toSorted()).toEqual(["created_at", "source", "text"]);
     expect(memories[0]?.id).toBeUndefined();
     expect(memories[0]?.score).toBeUndefined();
     expect(memories[0]?.resource_id).toBeUndefined();

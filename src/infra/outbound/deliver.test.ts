@@ -197,6 +197,9 @@ function expectSuccessfulWhatsAppInternalHookPayload(
     messageId: string;
     isGroup: boolean;
     groupId: string;
+    agentId: string;
+    cfg: OpenClawConfig;
+    timestamp: number;
   }>,
 ) {
   return expect.objectContaining({

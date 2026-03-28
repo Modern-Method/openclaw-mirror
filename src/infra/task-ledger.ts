@@ -216,6 +216,14 @@ export type TaskLedgerRecord =
   | TaskLedgerAgentRecord
   | TaskLedgerRecallRecord;
 
+type TaskLedgerReconcileNoteRecord = TaskLedgerTaskRecord & {
+  kind: "note";
+  actor: TaskLedgerActor & {
+    type: "system";
+    id: typeof RECONCILE_ACTOR_ID;
+  };
+};
+
 export type TaskLedgerSnapshot = {
   schema: typeof TASK_LEDGER_SNAPSHOT_SCHEMA;
   generatedAt: string;
@@ -1048,7 +1056,13 @@ function createSnapshotFromRecords(params: {
   };
 }
 
-function isReconcileTaskNote(record: TaskLedgerRecord): record is TaskLedgerTaskRecord {
+function isTaskLedgerTaskRecord(record: TaskLedgerRecord): record is TaskLedgerTaskRecord {
+  return record.entity === "task";
+}
+
+function isReconcileTaskNote(
+  record: TaskLedgerRecord | TaskLedgerTaskRecord,
+): record is TaskLedgerReconcileNoteRecord {
   return (
     record.entity === "task" &&
     record.kind === "note" &&
@@ -1189,32 +1203,43 @@ function deriveTaskActivationEvidence(
       continue;
     }
 
-    if (record.entity !== "task" || record.taskId !== task.id || isReconcileTaskNote(record)) {
+    if (
+      !isTaskLedgerTaskRecord(record) ||
+      record.taskId !== task.id ||
+      isReconcileTaskNote(record)
+    ) {
       continue;
     }
 
-    const explicitAgentEvidence = resolveExplicitAgentActivationNoteEvidence(record, assignedAgent);
+    const taskRecord = record;
+    const explicitAgentEvidence = resolveExplicitAgentActivationNoteEvidence(
+      taskRecord,
+      assignedAgent,
+    );
     const disposition =
       explicitAgentEvidence?.startDisposition !== undefined
         ? {
             startDisposition: explicitAgentEvidence.startDisposition,
             startDispositionReason: explicitAgentEvidence.startDispositionReason,
           }
-        : resolveActivationStartDisposition(record);
+        : resolveActivationStartDisposition(taskRecord);
 
-    if (!evidence.startedAt && (isActivationStartProof(record) || explicitAgentEvidence?.started)) {
-      evidence.startedAt = record.ts;
+    if (
+      !evidence.startedAt &&
+      (isActivationStartProof(taskRecord) || explicitAgentEvidence?.started)
+    ) {
+      evidence.startedAt = taskRecord.ts;
     }
     if (disposition && !evidence.startDisposition) {
       evidence.startDisposition = disposition.startDisposition;
-      evidence.startDispositionAt = record.ts;
+      evidence.startDispositionAt = taskRecord.ts;
       evidence.startDispositionReason = disposition.startDispositionReason;
     }
     if (
       !evidence.acknowledgedAt &&
       (explicitAgentEvidence?.acknowledged || evidence.startedAt || disposition)
     ) {
-      evidence.acknowledgedAt = record.ts;
+      evidence.acknowledgedAt = taskRecord.ts;
     }
   }
 
@@ -1288,16 +1313,17 @@ function deriveTaskProofCheckpointEvidence(
   let prompt: TaskProofCheckpointState["prompt"];
 
   for (const record of records) {
-    if (record.entity !== "task" || record.taskId !== task.id) {
+    if (!isTaskLedgerTaskRecord(record) || record.taskId !== task.id) {
       continue;
     }
 
-    const nextState = resolveTaskRecordState(record, currentState);
+    const taskRecord = record;
+    const nextState = resolveTaskRecordState(taskRecord, currentState);
     const enteredInProgress = nextState === "in_progress" && currentState !== "in_progress";
     const leftInProgress = currentState === "in_progress" && nextState !== "in_progress";
 
     if (enteredInProgress) {
-      currentCycleStartedAt = record.ts;
+      currentCycleStartedAt = taskRecord.ts;
       statusOnlyUpdateCount = 0;
       lastStatusNoteAt = undefined;
       prompt = undefined;
@@ -1310,9 +1336,9 @@ function deriveTaskProofCheckpointEvidence(
 
     currentState = nextState;
 
-    if (hasConcreteTaskProofCheckpoint(record.proofCheckpoint)) {
-      lastCheckpointAt = record.ts;
-      lastCheckpoint = record.proofCheckpoint;
+    if (hasConcreteTaskProofCheckpoint(taskRecord.proofCheckpoint)) {
+      lastCheckpointAt = taskRecord.ts;
+      lastCheckpoint = taskRecord.proofCheckpoint;
       statusOnlyUpdateCount = 0;
       lastStatusNoteAt = undefined;
       prompt = undefined;
@@ -1323,17 +1349,17 @@ function deriveTaskProofCheckpointEvidence(
       continue;
     }
 
-    if (isStatusOnlyAgentTaskNote(record)) {
+    if (isStatusOnlyAgentTaskNote(taskRecord)) {
       statusOnlyUpdateCount += 1;
-      lastStatusNoteAt = record.ts;
+      lastStatusNoteAt = taskRecord.ts;
       continue;
     }
 
-    if (isProofCheckpointPromptRecord(record)) {
+    if (isProofCheckpointPromptRecord(taskRecord)) {
       prompt = {
         required: true,
         reason: "status_loop",
-        requestedAt: record.ts,
+        requestedAt: taskRecord.ts,
         requiredSignals: [...TASK_PROOF_CHECKPOINT_SIGNAL_TYPES],
       };
     }

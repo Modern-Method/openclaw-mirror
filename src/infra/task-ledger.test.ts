@@ -11,7 +11,9 @@ import {
   publishTaskLedgerEvents,
   readTaskLedgerEvents,
   readTaskLedgerSnapshot,
+  type TaskLedgerRecallRecord,
   type TaskLedgerRecord,
+  type TaskLedgerTaskRecord,
 } from "./task-ledger.js";
 
 const stateDirs: string[] = [];
@@ -40,6 +42,14 @@ async function appendRawEvents(stateDir: string, events: TaskLedgerRecord[]) {
     `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
     "utf8",
   );
+}
+
+function isTaskRecord(event: TaskLedgerRecord): event is TaskLedgerTaskRecord {
+  return event.entity === "task";
+}
+
+function isRecallRecord(event: TaskLedgerRecord): event is TaskLedgerRecallRecord {
+  return event.entity === "recall";
 }
 
 afterEach(async () => {
@@ -502,7 +512,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
     const agentEvents = await readTaskLedgerEvents({ stateDir, agentId: "forge" });
 
     expect(firstTransition.accepted).toBe(1);
@@ -574,7 +586,9 @@ describe("task ledger", () => {
     });
 
     const snapshot = await readTaskLedgerSnapshot({ stateDir });
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     expect(started.accepted).toBe(1);
     expect(qa.accepted).toBe(1);
@@ -760,7 +774,9 @@ describe("task ledger", () => {
 
     const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-activation-2" });
     const activationNotes = taskEvents
-      .filter((event) => event.entity === "task" && event.kind === "note")
+      .filter(
+        (event): event is TaskLedgerTaskRecord => isTaskRecord(event) && event.kind === "note",
+      )
       .map((event) => event.summary)
       .filter((summary) => summary.startsWith("Activation SLA miss:"));
 
@@ -886,7 +902,9 @@ describe("task ledger", () => {
     const activation = snapshot.tasks[0]?.metadata.activationSla as Record<string, unknown>;
     const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-activation-4" });
     const activationNotes = taskEvents
-      .filter((event) => event.entity === "task" && event.kind === "note")
+      .filter(
+        (event): event is TaskLedgerTaskRecord => isTaskRecord(event) && event.kind === "note",
+      )
       .map((event) => event.summary)
       .filter((summary) => summary.startsWith("Activation SLA miss:"));
 
@@ -1016,7 +1034,9 @@ describe("task ledger", () => {
       const activation = snapshot.tasks[0]?.metadata.activationSla as Record<string, unknown>;
       const taskEvents = await readTaskLedgerEvents({ stateDir, taskId });
       const activationNotes = taskEvents
-        .filter((event) => event.entity === "task" && event.kind === "note")
+        .filter(
+          (event): event is TaskLedgerTaskRecord => isTaskRecord(event) && event.kind === "note",
+        )
         .map((event) => event.summary)
         .filter((summary) => summary.startsWith("Activation SLA miss:"));
 
@@ -1227,7 +1247,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     expect(result.accepted).toBe(3);
     expect(taskEvents.at(-1)).toMatchObject({
@@ -1271,7 +1293,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     expect(result.accepted).toBe(3);
     expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
@@ -1326,12 +1350,12 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
     const reconcileEvents = taskEvents.filter(
-      (event) =>
-        event.entity === "task" &&
-        event.kind === "note" &&
-        event.actor.id === "task-ledger-reconciler",
+      (event): event is TaskLedgerTaskRecord =>
+        event.kind === "note" && event.actor.id === "task-ledger-reconciler",
     );
 
     expect(replay.accepted).toBe(1);
@@ -1370,7 +1394,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     expect(result.accepted).toBe(3);
     expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
@@ -1415,7 +1441,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const blockedTaskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const blockedTaskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     expect(result.accepted).toBe(4);
     expect(blockedTaskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
@@ -1448,7 +1476,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     expect(result.accepted).toBe(3);
     expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile mismatch:/);
@@ -1585,14 +1615,16 @@ describe("task ledger", () => {
     });
 
     expect(result.accepted).toBe(1);
-    expect(result.events[0].scope).toMatchObject({
+    const recallEvent = result.events.find(isRecallRecord);
+    expect(recallEvent).toBeDefined();
+    expect(recallEvent?.scope).toMatchObject({
       senderId: "8480568759",
       channelClass: "dm",
       threadId: "agent:main:thread",
       resourceId: "agent:main:resource",
     });
-    expect(result.events[0].scope?.ignored).toBeUndefined();
-    expect(result.events[0].scope?.dropped).toBeUndefined();
+    expect(recallEvent?.scope?.ignored).toBeUndefined();
+    expect(recallEvent?.scope?.dropped).toBeUndefined();
   });
 
   it("includes recall traces in agent-scoped event reads", async () => {
@@ -1670,6 +1702,9 @@ describe("task ledger", () => {
             agentId: "forge",
             ran: true,
             dependencyStatus: "bogus-status" as never,
+            candidatesConsidered: 0,
+            injectedCount: 0,
+            injectedChars: 0,
             ts: "2026-03-15T07:24:00.000Z",
           },
         ],

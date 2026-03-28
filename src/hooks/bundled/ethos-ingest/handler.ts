@@ -88,6 +88,17 @@ function compactRecord(input: Record<string, unknown>): Record<string, unknown> 
   return output;
 }
 
+function compactStringRecord(input: Record<string, string | undefined>): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
 function resolveSenderId(
   context: MessageReceivedHookContext | MessageSentHookContext,
   isInbound: boolean,
@@ -115,7 +126,7 @@ async function postWithTimeout(params: {
   try {
     const response = await fetch(params.url, {
       method: "POST",
-      headers: compactRecord({
+      headers: compactStringRecord({
         "content-type": "application/json",
         authorization: params.apiKey ? `Bearer ${params.apiKey}` : undefined,
       }),
