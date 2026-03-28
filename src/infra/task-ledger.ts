@@ -9,6 +9,10 @@ export const TASK_LEDGER_SNAPSHOT_SCHEMA = "openclaw.task-ledger.snapshot.v1" as
 export const TASK_STATES = ["backlog", "todo", "in_progress", "qa", "done", "blocked"] as const;
 export const TASK_PRIORITIES = ["low", "medium", "high", "critical"] as const;
 export const AGENT_ACTIVITY_STATUSES = ["idle", "running", "waiting", "blocked"] as const;
+export const TASK_ACTIVATION_SLA_METADATA_KEY = "activationSla" as const;
+export const TASK_ACTIVATION_ACK_DEADLINE_MS = 5 * 60_000;
+export const TASK_ACTIVATION_LANE_DEADLINE_MS = 10 * 60_000;
+export const TASK_ACTIVATION_START_DEADLINE_MS = 15 * 60_000;
 
 const DEFAULT_BUS_TOPIC = "shared.task.ledger";
 const DEFAULT_SOURCE = "openclaw";
@@ -32,6 +36,37 @@ type MaterializedLedgerState = {
   appliedRecords: TaskLedgerRecord[];
   lastRecordByEntity: Map<string, TaskLedgerRecord>;
   seenIdempotencyKeysByEntity: Map<string, Set<string>>;
+};
+
+type TaskActivationDisposition = "blocked" | "deferred";
+
+type TaskActivationSla = {
+  version: 1;
+  assignedAt: string;
+  acknowledgeWithinMs: number;
+  acknowledgeDeadlineAt: string;
+  laneWithinMs: number;
+  laneDeadlineAt: string;
+  startWithinMs: number;
+  startDeadlineAt: string;
+  acknowledgedAt?: string;
+  lanePinnedAt?: string;
+  lane?: string;
+  startedAt?: string;
+  startDisposition?: TaskActivationDisposition;
+  startDispositionAt?: string;
+  startDispositionReason?: string;
+};
+
+type TaskActivationEvidence = {
+  activation: TaskActivationSla;
+  acknowledgedAt?: string;
+  lanePinnedAt?: string;
+  lane?: string;
+  startedAt?: string;
+  startDisposition?: TaskActivationDisposition;
+  startDispositionAt?: string;
+  startDispositionReason?: string;
 };
 
 export type TaskState = (typeof TASK_STATES)[number];
@@ -385,6 +420,164 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(stableValue(value));
 }
 
+function addDeadline(ts: string, deltaMs: number): string {
+  const parsed = Date.parse(ts);
+  if (!Number.isFinite(parsed)) {
+    return ts;
+  }
+  return new Date(parsed + deltaMs).toISOString();
+}
+
+function normalizeActivationDisposition(value: unknown): TaskActivationDisposition | undefined {
+  return value === "blocked" || value === "deferred" ? value : undefined;
+}
+
+function parseTaskActivationSla(value: unknown): TaskActivationSla | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const raw = value as Record<string, unknown>;
+  const assignedAt = normalizePersistedTimestamp(raw.assignedAt);
+  const acknowledgeDeadlineAt = normalizePersistedTimestamp(raw.acknowledgeDeadlineAt);
+  const laneDeadlineAt = normalizePersistedTimestamp(raw.laneDeadlineAt);
+  const startDeadlineAt = normalizePersistedTimestamp(raw.startDeadlineAt);
+  if (!assignedAt || !acknowledgeDeadlineAt || !laneDeadlineAt || !startDeadlineAt) {
+    return undefined;
+  }
+
+  const acknowledgeWithinMs = normalizeNonNegativeInteger(raw.acknowledgeWithinMs);
+  const laneWithinMs = normalizeNonNegativeInteger(raw.laneWithinMs);
+  const startWithinMs = normalizeNonNegativeInteger(raw.startWithinMs);
+
+  return {
+    version: 1,
+    assignedAt,
+    acknowledgeWithinMs:
+      acknowledgeWithinMs > 0 ? acknowledgeWithinMs : TASK_ACTIVATION_ACK_DEADLINE_MS,
+    acknowledgeDeadlineAt,
+    laneWithinMs: laneWithinMs > 0 ? laneWithinMs : TASK_ACTIVATION_LANE_DEADLINE_MS,
+    laneDeadlineAt,
+    startWithinMs: startWithinMs > 0 ? startWithinMs : TASK_ACTIVATION_START_DEADLINE_MS,
+    startDeadlineAt,
+    ...(normalizePersistedTimestamp(raw.acknowledgedAt)
+      ? { acknowledgedAt: normalizePersistedTimestamp(raw.acknowledgedAt) ?? undefined }
+      : {}),
+    ...(normalizePersistedTimestamp(raw.lanePinnedAt)
+      ? { lanePinnedAt: normalizePersistedTimestamp(raw.lanePinnedAt) ?? undefined }
+      : {}),
+    ...(trimToUndefined(raw.lane) ? { lane: trimToUndefined(raw.lane) } : {}),
+    ...(normalizePersistedTimestamp(raw.startedAt)
+      ? { startedAt: normalizePersistedTimestamp(raw.startedAt) ?? undefined }
+      : {}),
+    ...(normalizeActivationDisposition(raw.startDisposition)
+      ? { startDisposition: normalizeActivationDisposition(raw.startDisposition) }
+      : {}),
+    ...(normalizePersistedTimestamp(raw.startDispositionAt)
+      ? { startDispositionAt: normalizePersistedTimestamp(raw.startDispositionAt) ?? undefined }
+      : {}),
+    ...(trimToUndefined(raw.startDispositionReason)
+      ? { startDispositionReason: trimToUndefined(raw.startDispositionReason) }
+      : {}),
+  };
+}
+
+function createTaskActivationSla(assignedAt: string): TaskActivationSla {
+  return {
+    version: 1,
+    assignedAt,
+    acknowledgeWithinMs: TASK_ACTIVATION_ACK_DEADLINE_MS,
+    acknowledgeDeadlineAt: addDeadline(assignedAt, TASK_ACTIVATION_ACK_DEADLINE_MS),
+    laneWithinMs: TASK_ACTIVATION_LANE_DEADLINE_MS,
+    laneDeadlineAt: addDeadline(assignedAt, TASK_ACTIVATION_LANE_DEADLINE_MS),
+    startWithinMs: TASK_ACTIVATION_START_DEADLINE_MS,
+    startDeadlineAt: addDeadline(assignedAt, TASK_ACTIVATION_START_DEADLINE_MS),
+  };
+}
+
+function withTaskActivationSlaMetadata(
+  metadata: Record<string, unknown>,
+  activation: TaskActivationSla | undefined,
+): Record<string, unknown> {
+  const next = normalizeMetadata(metadata);
+  if (!activation) {
+    if (Object.hasOwn(next, TASK_ACTIVATION_SLA_METADATA_KEY)) {
+      delete next[TASK_ACTIVATION_SLA_METADATA_KEY];
+    }
+    return next;
+  }
+  next[TASK_ACTIVATION_SLA_METADATA_KEY] = activation;
+  return next;
+}
+
+function buildNextTaskActivationSla(params: {
+  existing?: TaskLedgerTask;
+  next: TaskLedgerTask;
+  ts: string;
+}): TaskActivationSla | undefined {
+  const assignedAgent = trimToUndefined(params.next.assignedAgent);
+  if (!assignedAgent) {
+    return undefined;
+  }
+  if (params.next.state === "done" || params.next.state === "qa") {
+    return undefined;
+  }
+
+  const existingActivation = parseTaskActivationSla(
+    params.existing?.metadata[TASK_ACTIVATION_SLA_METADATA_KEY],
+  );
+  const assignedChanged = assignedAgent !== trimToUndefined(params.existing?.assignedAgent);
+  const reopenedIntoTodo =
+    (params.next.state === "backlog" || params.next.state === "todo") &&
+    params.existing !== undefined &&
+    params.existing.state !== params.next.state &&
+    (params.existing.state === "in_progress" ||
+      params.existing.state === "blocked" ||
+      params.existing.state === "qa" ||
+      params.existing.state === "done");
+
+  let activation =
+    !existingActivation || assignedChanged || reopenedIntoTodo
+      ? createTaskActivationSla(params.ts)
+      : { ...existingActivation };
+
+  if (params.next.state === "in_progress" && !activation.startedAt) {
+    activation.startedAt = params.ts;
+  }
+
+  if (params.next.state === "blocked" && !activation.startDisposition) {
+    activation.startDisposition = "blocked";
+    activation.startDispositionAt = params.ts;
+    activation.startDispositionReason =
+      trimToUndefined(params.next.blockedReason) ?? activation.startDispositionReason;
+  }
+
+  return activation;
+}
+
+function buildTaskWithActivationMetadata(
+  existing: TaskLedgerTask | undefined,
+  patch: TaskLedgerTaskPatch,
+  ts: string,
+  fallbackTitle?: string,
+): TaskLedgerTask {
+  const next = mergeTaskRecord(existing, patch, ts, fallbackTitle);
+  const activation = buildNextTaskActivationSla({ existing, next, ts });
+  next.metadata = withTaskActivationSlaMetadata(next.metadata, activation);
+  return next;
+}
+
+function metadataChanged(
+  existing: TaskLedgerTask | undefined,
+  next: TaskLedgerTask,
+  patch: TaskLedgerTaskPatch,
+): boolean {
+  if (patch.metadata !== undefined) {
+    return true;
+  }
+  return stableStringify(existing?.metadata ?? {}) !== stableStringify(next.metadata);
+}
+
 function resolveTaskLedgerPaths(stateDir = resolveStateDir()) {
   const rootDir = path.join(stateDir, "shared", "task-ledger");
   return {
@@ -726,6 +919,7 @@ function createSnapshotFromRecords(params: {
   recentEventLimit?: number;
 }): TaskLedgerSnapshot {
   const materialized = materializeLedgerState(params.records);
+  applyDerivedTaskActivationEvidence(materialized);
   const recentLimit =
     typeof params.recentEventLimit === "number" && params.recentEventLimit > 0
       ? Math.floor(params.recentEventLimit)
@@ -749,6 +943,191 @@ function isReconcileTaskNote(record: TaskLedgerRecord): record is TaskLedgerTask
     record.actor.type === "system" &&
     record.actor.id === RECONCILE_ACTOR_ID
   );
+}
+
+function resolveActivationStartDisposition(
+  record: TaskLedgerTaskRecord,
+): Pick<TaskActivationEvidence, "startDisposition" | "startDispositionReason"> | null {
+  const key = trimToUndefined(record.idempotencyKey);
+  if (record.toState === "blocked" || record.kind === "blocked") {
+    return {
+      startDisposition: "blocked",
+      startDispositionReason: trimToUndefined(record.summary),
+    };
+  }
+  if (key?.startsWith("task-milestone:waiting-for-input:")) {
+    return {
+      startDisposition: "deferred",
+      startDispositionReason: trimToUndefined(record.summary),
+    };
+  }
+  if (
+    key?.startsWith("task-milestone:unsafe-to-proceed:") ||
+    key?.startsWith("task-milestone:repeated-failure:")
+  ) {
+    return {
+      startDisposition: "blocked",
+      startDispositionReason: trimToUndefined(record.summary),
+    };
+  }
+  return null;
+}
+
+function isActivationStartProof(record: TaskLedgerTaskRecord): boolean {
+  const key = trimToUndefined(record.idempotencyKey);
+  return (
+    key?.startsWith("task-milestone:run-started:") === true ||
+    record.toState === "in_progress" ||
+    record.kind === "started"
+  );
+}
+
+function resolveExplicitAgentActivationNoteEvidence(
+  record: TaskLedgerTaskRecord,
+  assignedAgent: string,
+): {
+  acknowledged: true;
+  started?: true;
+  startDisposition?: TaskActivationDisposition;
+  startDispositionReason?: string;
+} | null {
+  if (
+    record.kind !== "note" ||
+    record.actor.type !== "agent" ||
+    trimToUndefined(record.actor.id) !== assignedAgent
+  ) {
+    return null;
+  }
+
+  const summary = trimToUndefined(record.summary)?.toLowerCase();
+  if (!summary) {
+    return null;
+  }
+
+  if (/^(accepted|acknowledged)\b/.test(summary)) {
+    return { acknowledged: true };
+  }
+  if (/^(in[- ]progress|started|starting)\b/.test(summary)) {
+    return { acknowledged: true, started: true };
+  }
+  if (/^(blocked|unsafe to proceed)\b/.test(summary)) {
+    return {
+      acknowledged: true,
+      startDisposition: "blocked",
+      startDispositionReason: trimToUndefined(record.summary),
+    };
+  }
+  if (/^(deferred|waiting(?: |-)?for(?: |-)?input)\b/.test(summary)) {
+    return {
+      acknowledged: true,
+      startDisposition: "deferred",
+      startDispositionReason: trimToUndefined(record.summary),
+    };
+  }
+  return null;
+}
+
+function deriveTaskActivationEvidence(
+  task: TaskLedgerTask,
+  records: TaskLedgerRecord[],
+): TaskActivationEvidence | null {
+  const activation = parseTaskActivationSla(task.metadata[TASK_ACTIVATION_SLA_METADATA_KEY]);
+  const assignedAgent = trimToUndefined(task.assignedAgent);
+  if (!activation || !assignedAgent) {
+    return null;
+  }
+
+  const assignedAtMs = Date.parse(activation.assignedAt);
+  if (!Number.isFinite(assignedAtMs)) {
+    return null;
+  }
+
+  const evidence: TaskActivationEvidence = {
+    activation: { ...activation },
+    ...(activation.acknowledgedAt ? { acknowledgedAt: activation.acknowledgedAt } : {}),
+    ...(activation.lanePinnedAt ? { lanePinnedAt: activation.lanePinnedAt } : {}),
+    ...(activation.lane ? { lane: activation.lane } : {}),
+    ...(activation.startedAt ? { startedAt: activation.startedAt } : {}),
+    ...(activation.startDisposition ? { startDisposition: activation.startDisposition } : {}),
+    ...(activation.startDispositionAt ? { startDispositionAt: activation.startDispositionAt } : {}),
+    ...(activation.startDispositionReason
+      ? { startDispositionReason: activation.startDispositionReason }
+      : {}),
+  };
+
+  for (const record of records) {
+    const recordTsMs = Date.parse(record.ts);
+    if (!Number.isFinite(recordTsMs) || recordTsMs < assignedAtMs) {
+      continue;
+    }
+
+    if (
+      record.entity === "agent" &&
+      record.agentId === assignedAgent &&
+      trimToUndefined(record.currentTaskId) === task.id
+    ) {
+      if (!evidence.acknowledgedAt) {
+        evidence.acknowledgedAt = record.ts;
+      }
+      const lane = trimToUndefined(record.lane);
+      if (lane && !evidence.lanePinnedAt) {
+        evidence.lanePinnedAt = record.ts;
+        evidence.lane = lane;
+      }
+      continue;
+    }
+
+    if (record.entity !== "task" || record.taskId !== task.id || isReconcileTaskNote(record)) {
+      continue;
+    }
+
+    const explicitAgentEvidence = resolveExplicitAgentActivationNoteEvidence(record, assignedAgent);
+    const disposition =
+      explicitAgentEvidence?.startDisposition !== undefined
+        ? {
+            startDisposition: explicitAgentEvidence.startDisposition,
+            startDispositionReason: explicitAgentEvidence.startDispositionReason,
+          }
+        : resolveActivationStartDisposition(record);
+
+    if (!evidence.startedAt && (isActivationStartProof(record) || explicitAgentEvidence?.started)) {
+      evidence.startedAt = record.ts;
+    }
+    if (disposition && !evidence.startDisposition) {
+      evidence.startDisposition = disposition.startDisposition;
+      evidence.startDispositionAt = record.ts;
+      evidence.startDispositionReason = disposition.startDispositionReason;
+    }
+    if (
+      !evidence.acknowledgedAt &&
+      (explicitAgentEvidence?.acknowledged || evidence.startedAt || disposition)
+    ) {
+      evidence.acknowledgedAt = record.ts;
+    }
+  }
+
+  return evidence;
+}
+
+function applyDerivedTaskActivationEvidence(materialized: MaterializedLedgerState) {
+  for (const task of materialized.tasks.values()) {
+    const evidence = deriveTaskActivationEvidence(task, materialized.appliedRecords);
+    if (!evidence) {
+      continue;
+    }
+    task.metadata = withTaskActivationSlaMetadata(task.metadata, {
+      ...evidence.activation,
+      ...(evidence.acknowledgedAt ? { acknowledgedAt: evidence.acknowledgedAt } : {}),
+      ...(evidence.lanePinnedAt ? { lanePinnedAt: evidence.lanePinnedAt } : {}),
+      ...(evidence.lane ? { lane: evidence.lane } : {}),
+      ...(evidence.startedAt ? { startedAt: evidence.startedAt } : {}),
+      ...(evidence.startDisposition ? { startDisposition: evidence.startDisposition } : {}),
+      ...(evidence.startDispositionAt ? { startDispositionAt: evidence.startDispositionAt } : {}),
+      ...(evidence.startDispositionReason
+        ? { startDispositionReason: evidence.startDispositionReason }
+        : {}),
+    });
+  }
 }
 
 function buildReconcileIdempotencyKey(kind: string, parts: Array<string | undefined>): string {
@@ -802,10 +1181,13 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
   }
 
   const notes: TaskLedgerTaskRecord[] = [];
+  const activationEvidenceByTaskId = new Map<string, TaskActivationEvidence>();
   const activeWorkByAgentId = new Map<
     string,
     { taskId: string; tsMs: number; referenceId: string; source: "task" | "heartbeat" }
   >();
+  const reconciliationTs = materialized.appliedRecords.at(-1)?.ts ?? new Date().toISOString();
+  const reconciliationTsMs = Date.parse(reconciliationTs);
 
   const queueTaskNote = (taskId: string, summary: string, idempotencyKey: string, ts?: string) => {
     if (!materialized.tasks.has(taskId) || emittedIdempotencyKeys.has(idempotencyKey)) {
@@ -841,10 +1223,18 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
   };
 
   for (const task of materialized.tasks.values()) {
+    const activationEvidence = deriveTaskActivationEvidence(task, materialized.appliedRecords);
+    if (activationEvidence) {
+      activationEvidenceByTaskId.set(task.id, activationEvidence);
+    }
+  }
+
+  for (const task of materialized.tasks.values()) {
     const assignedAgent = trimToUndefined(task.assignedAgent);
     const taskRecord = lastSubstantiveTaskRecordById.get(task.id);
     const taskRecordId = taskRecord?.id;
     const taskTsMs = taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt);
+    const activationEvidence = activationEvidenceByTaskId.get(task.id);
 
     if (task.state === "in_progress" && assignedAgent) {
       considerActiveWork(assignedAgent, {
@@ -883,7 +1273,9 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
         continue;
       }
 
-      const taskReferenceTsMs = taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt);
+      const taskReferenceTsMs = taskRecord
+        ? Date.parse(taskRecord.ts)
+        : Date.parse(task.lastEventAt);
       const staleDeltaMs = taskReferenceTsMs - Date.parse(agent.lastSeenAt);
       if (Number.isFinite(staleDeltaMs) && staleDeltaMs >= RECONCILE_AGENT_STALE_MS) {
         queueTaskNote(
@@ -894,7 +1286,71 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
             assignedAgent,
             "stale",
           ]),
-          Number.isFinite(taskReferenceTsMs) ? new Date(taskReferenceTsMs).toISOString() : undefined,
+          Number.isFinite(taskReferenceTsMs)
+            ? new Date(taskReferenceTsMs).toISOString()
+            : undefined,
+        );
+      }
+    }
+
+    if (
+      assignedAgent &&
+      activationEvidence &&
+      Number.isFinite(reconciliationTsMs) &&
+      task.state !== "blocked"
+    ) {
+      const activation = activationEvidence.activation;
+      const activationCycleId = `${task.id}:${assignedAgent}:${activation.assignedAt}`;
+      const acknowledgeDeadlineMs = Date.parse(activation.acknowledgeDeadlineAt);
+      if (
+        !activationEvidence.acknowledgedAt &&
+        Number.isFinite(acknowledgeDeadlineMs) &&
+        reconciliationTsMs >= acknowledgeDeadlineMs
+      ) {
+        queueTaskNote(
+          task.id,
+          `Activation SLA miss: assigned agent ${assignedAgent} has not acknowledged the task in the ledger within ${Math.floor(activation.acknowledgeWithinMs / 60_000)} minutes. Expected explicit task context, blocked state, or deferred progress before ${activation.acknowledgeDeadlineAt}.`,
+          buildReconcileIdempotencyKey("activation-ack-missed", [
+            activationCycleId,
+            activation.acknowledgeDeadlineAt,
+          ]),
+          activation.acknowledgeDeadlineAt,
+        );
+      }
+
+      const laneDeadlineMs = Date.parse(activation.laneDeadlineAt);
+      if (
+        !activationEvidence.lanePinnedAt &&
+        Number.isFinite(laneDeadlineMs) &&
+        reconciliationTsMs >= laneDeadlineMs &&
+        !activationEvidence.startDisposition
+      ) {
+        queueTaskNote(
+          task.id,
+          `Activation SLA miss: assigned agent ${assignedAgent} has not pinned a lane for this task within ${Math.floor(activation.laneWithinMs / 60_000)} minutes. Expected a heartbeat with lane context before ${activation.laneDeadlineAt}.`,
+          buildReconcileIdempotencyKey("activation-lane-missed", [
+            activationCycleId,
+            activation.laneDeadlineAt,
+          ]),
+          activation.laneDeadlineAt,
+        );
+      }
+
+      const startDeadlineMs = Date.parse(activation.startDeadlineAt);
+      if (
+        !activationEvidence.startedAt &&
+        !activationEvidence.startDisposition &&
+        Number.isFinite(startDeadlineMs) &&
+        reconciliationTsMs >= startDeadlineMs
+      ) {
+        queueTaskNote(
+          task.id,
+          `Activation SLA miss: assigned agent ${assignedAgent} did not show explicit start proof within ${Math.floor(activation.startWithinMs / 60_000)} minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before ${activation.startDeadlineAt}.`,
+          buildReconcileIdempotencyKey("activation-start-missed", [
+            activationCycleId,
+            activation.startDeadlineAt,
+          ]),
+          activation.startDeadlineAt,
         );
       }
     }
@@ -1284,7 +1740,7 @@ function normalizeTaskUpsertRecord(
   if (!title) {
     throw new Error(`task title required for ${taskId}`);
   }
-  const next = mergeTaskRecord(existing, patch, ts, title);
+  const next = buildTaskWithActivationMetadata(existing, patch, ts, title);
   next.id = taskId;
   const created = !existing;
   return {
@@ -1343,7 +1799,12 @@ function normalizeTaskTransitionRecord(
   if (!existing && !title) {
     throw new Error(`task ${taskId} not found and no title provided`);
   }
-  const next = mergeTaskRecord(existing, { ...patch, state: input.state }, ts, title);
+  const next = buildTaskWithActivationMetadata(
+    existing,
+    { ...patch, state: input.state },
+    ts,
+    title,
+  );
   next.id = taskId;
   return {
     schema: TASK_LEDGER_SCHEMA,
@@ -1363,6 +1824,7 @@ function normalizeTaskTransitionRecord(
       ...(input.state === "blocked" && !trimToUndefined(patch.blockedReason)
         ? { blockedReason: trimToUndefined(input.summary) }
         : {}),
+      ...(metadataChanged(existing, next, patch) ? { metadata: next.metadata } : {}),
     },
     ...(normalizeIdempotencyKey(input.idempotencyKey)
       ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
@@ -1382,6 +1844,18 @@ function normalizeTaskNoteRecord(
     throw new Error(`task ${taskId} not found and no title provided`);
   }
   const toState = isTaskState(input.state) ? input.state : undefined;
+  const next = buildTaskWithActivationMetadata(
+    existing,
+    {
+      ...patch,
+      ...(toState ? { state: toState } : {}),
+      ...(input.kind === "blocked" && !trimToUndefined(patch.blockedReason)
+        ? { blockedReason: trimToUndefined(input.summary) }
+        : {}),
+    },
+    ts,
+    title,
+  );
   return {
     schema: TASK_LEDGER_SCHEMA,
     id: randomUUID(),
@@ -1399,6 +1873,7 @@ function normalizeTaskNoteRecord(
       ...(input.kind === "blocked" && !trimToUndefined(patch.blockedReason)
         ? { blockedReason: trimToUndefined(input.summary) }
         : {}),
+      ...(metadataChanged(existing, next, patch) ? { metadata: next.metadata } : {}),
     },
     ...(normalizeIdempotencyKey(input.idempotencyKey)
       ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
@@ -1417,19 +1892,12 @@ function normalizeNonNegativeInteger(value: unknown): number {
   return Math.max(0, Math.floor(value));
 }
 
-function normalizeDependencyStatus(
-  value: unknown,
-): "ok" | "timeout" | "error" | "skipped" {
+function normalizeDependencyStatus(value: unknown): "ok" | "timeout" | "error" | "skipped" {
   if (value === undefined) {
     return "ok";
   }
 
-  if (
-    value === "ok" ||
-    value === "timeout" ||
-    value === "error" ||
-    value === "skipped"
-  ) {
+  if (value === "ok" || value === "timeout" || value === "error" || value === "skipped") {
     return value;
   }
 

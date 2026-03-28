@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  TASK_ACTIVATION_ACK_DEADLINE_MS,
+  TASK_ACTIVATION_LANE_DEADLINE_MS,
+  TASK_ACTIVATION_START_DEADLINE_MS,
   TASK_LEDGER_SCHEMA,
   publishTaskLedgerEvents,
   readTaskLedgerEvents,
@@ -655,6 +658,371 @@ describe("task ledger", () => {
         .map((event) => event.idempotencyKey),
     ).toEqual(["run-1:start", "run-1:end"]);
   });
+
+  it("projects activation deadlines and proof into snapshot task metadata", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-activation-1",
+            title: "Activate assigned work",
+            state: "todo",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T08:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            lane: "pinned",
+            currentTaskId: "task-activation-1",
+            summary: "Acknowledged and pinned",
+          },
+          ts: "2026-03-15T08:03:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-1",
+          summary: "Milestone update: active implementation work started in lane pinned.",
+          actor: {
+            type: "system",
+            id: "task-milestone-updater",
+            name: "Task milestone updater",
+          },
+          idempotencyKey: "task-milestone:run-started:task-activation-1:run-1:agent:forge:main",
+          ts: "2026-03-15T08:07:00.000Z",
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const activation = snapshot.tasks[0]?.metadata.activationSla as Record<string, unknown>;
+
+    expect(activation).toMatchObject({
+      version: 1,
+      assignedAt: "2026-03-15T08:00:00.000Z",
+      acknowledgeWithinMs: TASK_ACTIVATION_ACK_DEADLINE_MS,
+      acknowledgeDeadlineAt: "2026-03-15T08:05:00.000Z",
+      laneWithinMs: TASK_ACTIVATION_LANE_DEADLINE_MS,
+      laneDeadlineAt: "2026-03-15T08:10:00.000Z",
+      startWithinMs: TASK_ACTIVATION_START_DEADLINE_MS,
+      startDeadlineAt: "2026-03-15T08:15:00.000Z",
+      acknowledgedAt: "2026-03-15T08:03:00.000Z",
+      lanePinnedAt: "2026-03-15T08:03:00.000Z",
+      lane: "pinned",
+      startedAt: "2026-03-15T08:07:00.000Z",
+    });
+  });
+
+  it("emits activation SLA miss notes when assigned work stays silent past the deadlines", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-activation-2",
+            title: "Unstarted assigned work",
+            state: "todo",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T09:00:00.000Z",
+        },
+      ],
+    });
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-2",
+          summary: "Operator checked for activation proof.",
+          actor: { type: "operator", id: "mission-control" },
+          ts: "2026-03-15T09:20:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-activation-2" });
+    const activationNotes = taskEvents
+      .filter((event) => event.entity === "task" && event.kind === "note")
+      .map((event) => event.summary)
+      .filter((summary) => summary.startsWith("Activation SLA miss:"));
+
+    expect(activationNotes).toEqual([
+      "Activation SLA miss: assigned agent forge has not acknowledged the task in the ledger within 5 minutes. Expected explicit task context, blocked state, or deferred progress before 2026-03-15T09:05:00.000Z.",
+      "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T09:10:00.000Z.",
+      "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T09:15:00.000Z.",
+    ]);
+  });
+
+  it("treats deferred milestone evidence differently from silent missed-start work", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-activation-3",
+            title: "Awaiting operator input",
+            state: "todo",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T10:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            lane: "pinned",
+            currentTaskId: "task-activation-3",
+            summary: "Investigating",
+          },
+          ts: "2026-03-15T10:03:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-3",
+          summary:
+            "Milestone update: the active run is waiting for user input before it can continue.",
+          actor: {
+            type: "system",
+            id: "task-milestone-updater",
+            name: "Task milestone updater",
+          },
+          idempotencyKey: "task-milestone:waiting-for-input:task-activation-3:run-1",
+          ts: "2026-03-15T10:07:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-3",
+          summary: "Operator confirmed the task is still waiting on input.",
+          actor: { type: "operator", id: "mission-control" },
+          ts: "2026-03-15T10:20:00.000Z",
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const activation = snapshot.tasks[0]?.metadata.activationSla as Record<string, unknown>;
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-activation-3" });
+
+    expect(activation).toMatchObject({
+      acknowledgedAt: "2026-03-15T10:03:00.000Z",
+      lanePinnedAt: "2026-03-15T10:03:00.000Z",
+      lane: "pinned",
+      startDisposition: "deferred",
+      startDispositionAt: "2026-03-15T10:07:00.000Z",
+    });
+    expect(
+      taskEvents.some(
+        (event) =>
+          event.entity === "task" &&
+          event.kind === "note" &&
+          event.summary.includes("did not show explicit start proof"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat routine agent-authored notes as activation acknowledgment evidence", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-activation-4",
+            title: "Routine note is not activation proof",
+            state: "todo",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T11:00:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-4",
+          summary: "Investigated the existing queue behavior and wrote down findings.",
+          actor: { type: "agent", id: "forge" },
+          ts: "2026-03-15T11:03:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-4",
+          summary: "Operator checked activation state.",
+          actor: { type: "operator", id: "mission-control" },
+          ts: "2026-03-15T11:20:00.000Z",
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const activation = snapshot.tasks[0]?.metadata.activationSla as Record<string, unknown>;
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-activation-4" });
+    const activationNotes = taskEvents
+      .filter((event) => event.entity === "task" && event.kind === "note")
+      .map((event) => event.summary)
+      .filter((summary) => summary.startsWith("Activation SLA miss:"));
+
+    expect(activation.acknowledgedAt).toBeUndefined();
+    expect(activation.startedAt).toBeUndefined();
+    expect(activation.startDisposition).toBeUndefined();
+    expect(activationNotes).toEqual([
+      "Activation SLA miss: assigned agent forge has not acknowledged the task in the ledger within 5 minutes. Expected explicit task context, blocked state, or deferred progress before 2026-03-15T11:05:00.000Z.",
+      "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T11:10:00.000Z.",
+      "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T11:15:00.000Z.",
+    ]);
+  });
+
+  it.each([
+    {
+      label: "accepted",
+      taskId: "task-activation-5",
+      title: "Accepted note counts as acknowledgment",
+      noteSummary: "Accepted: investigating task scope.",
+      taskTs: "2026-03-15T12:00:00.000Z",
+      noteTs: "2026-03-15T12:03:00.000Z",
+      reconcileTs: "2026-03-15T12:20:00.000Z",
+      expectedActivation: {
+        acknowledgedAt: "2026-03-15T12:03:00.000Z",
+      },
+      expectedMisses: [
+        "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T12:10:00.000Z.",
+        "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T12:15:00.000Z.",
+      ],
+    },
+    {
+      label: "in-progress",
+      taskId: "task-activation-6",
+      title: "In-progress note counts as start proof",
+      noteSummary: "In progress: implementing the task now.",
+      taskTs: "2026-03-15T13:00:00.000Z",
+      noteTs: "2026-03-15T13:04:00.000Z",
+      reconcileTs: "2026-03-15T13:20:00.000Z",
+      expectedActivation: {
+        acknowledgedAt: "2026-03-15T13:04:00.000Z",
+        startedAt: "2026-03-15T13:04:00.000Z",
+      },
+      expectedMisses: [
+        "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T13:10:00.000Z.",
+      ],
+    },
+    {
+      label: "blocked",
+      taskId: "task-activation-7",
+      title: "Blocked note counts as explicit disposition",
+      noteSummary: "Blocked: waiting on operator approval before proceeding.",
+      taskTs: "2026-03-15T14:00:00.000Z",
+      noteTs: "2026-03-15T14:04:00.000Z",
+      reconcileTs: "2026-03-15T14:20:00.000Z",
+      expectedActivation: {
+        acknowledgedAt: "2026-03-15T14:04:00.000Z",
+        startDisposition: "blocked",
+        startDispositionAt: "2026-03-15T14:04:00.000Z",
+        startDispositionReason: "Blocked: waiting on operator approval before proceeding.",
+      },
+      expectedMisses: [],
+    },
+    {
+      label: "deferred",
+      taskId: "task-activation-8",
+      title: "Deferred note counts as explicit disposition",
+      noteSummary: "Deferred: waiting for user input before editing.",
+      taskTs: "2026-03-15T15:00:00.000Z",
+      noteTs: "2026-03-15T15:04:00.000Z",
+      reconcileTs: "2026-03-15T15:20:00.000Z",
+      expectedActivation: {
+        acknowledgedAt: "2026-03-15T15:04:00.000Z",
+        startDisposition: "deferred",
+        startDispositionAt: "2026-03-15T15:04:00.000Z",
+        startDispositionReason: "Deferred: waiting for user input before editing.",
+      },
+      expectedMisses: [],
+    },
+  ])(
+    "treats $label explicit agent activation notes as evidence",
+    async ({
+      taskId,
+      title,
+      noteSummary,
+      taskTs,
+      noteTs,
+      reconcileTs,
+      expectedActivation,
+      expectedMisses,
+    }) => {
+      const stateDir = await createStateDir();
+
+      await publishTaskLedgerEvents({
+        stateDir,
+        events: [
+          {
+            entity: "task",
+            kind: "upsert",
+            task: {
+              id: taskId,
+              title,
+              state: "todo",
+              assignedAgent: "forge",
+            },
+            ts: taskTs,
+          },
+          {
+            entity: "task",
+            kind: "note",
+            taskId,
+            summary: noteSummary,
+            actor: { type: "agent", id: "forge" },
+            ts: noteTs,
+          },
+          {
+            entity: "task",
+            kind: "note",
+            taskId,
+            summary: "Operator checked activation state.",
+            actor: { type: "operator", id: "mission-control" },
+            ts: reconcileTs,
+          },
+        ],
+      });
+
+      const snapshot = await readTaskLedgerSnapshot({ stateDir });
+      const activation = snapshot.tasks[0]?.metadata.activationSla as Record<string, unknown>;
+      const taskEvents = await readTaskLedgerEvents({ stateDir, taskId });
+      const activationNotes = taskEvents
+        .filter((event) => event.entity === "task" && event.kind === "note")
+        .map((event) => event.summary)
+        .filter((summary) => summary.startsWith("Activation SLA miss:"));
+
+      expect(activation).toMatchObject(expectedActivation);
+      expect(activationNotes).toEqual(expectedMisses);
+    },
+  );
 
   it("emits reconcile evidence when an active agent points at a task that is still todo", async () => {
     const stateDir = await createStateDir();
