@@ -60,12 +60,24 @@ describe("task lifecycle publisher", () => {
         action: "note",
         taskId: "task-1",
         summary: "Implementation note",
+        proofCheckpoint: {
+          files: ["src/infra/task-ledger.ts"],
+          diffSummary: "Adds proof checkpoint metadata projection.",
+          tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+          reviewSignal: "Requested maintainer review",
+        },
       }),
     ).toMatchObject({
       entity: "task",
       kind: "note",
       taskId: "task-1",
       summary: "Implementation note",
+      proofCheckpoint: {
+        files: ["src/infra/task-ledger.ts"],
+        diffSummary: "Adds proof checkpoint metadata projection.",
+        tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+        reviewSignal: "Requested maintainer review",
+      },
     });
 
     expect(
@@ -178,7 +190,7 @@ describe("task lifecycle publisher", () => {
       (event) =>
         event.kind == "note" &&
         typeof event.idempotencyKey == "string" &&
-        event.idempotencyKey.startsWith("reconcile:in-progress-agent-missing:")
+        event.idempotencyKey.startsWith("reconcile:in-progress-agent-missing:"),
     );
 
     expect(reconcileNotes).toHaveLength(1);

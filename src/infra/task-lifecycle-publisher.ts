@@ -2,6 +2,7 @@ import {
   publishTaskLedgerEvents,
   type TaskLedgerActor,
   type TaskLedgerPublishResult,
+  type TaskProofCheckpoint,
   type TaskLedgerTask,
 } from "./task-ledger.js";
 
@@ -14,6 +15,7 @@ export type TaskLifecyclePublishInput = {
   actor?: Partial<TaskLedgerActor>;
   ts?: string;
   idempotencyKey?: string;
+  proofCheckpoint?: TaskProofCheckpoint;
   recentEventLimit?: number;
   stateDir?: string;
   task?: Partial<Omit<TaskLedgerTask, "id" | "title" | "lastEventAt">> & {
@@ -62,6 +64,7 @@ export function buildTaskLifecyclePublishInput(params: TaskLifecyclePublishInput
         ...(params.actor ? { actor: params.actor } : {}),
         ...(params.ts ? { ts: params.ts } : {}),
         ...(taskPatch ? { task: taskPatch } : {}),
+        ...(params.proofCheckpoint ? { proofCheckpoint: params.proofCheckpoint } : {}),
         ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
       };
     case "block":
@@ -85,6 +88,7 @@ export function buildTaskLifecyclePublishInput(params: TaskLifecyclePublishInput
         ...(params.actor ? { actor: params.actor } : {}),
         ...(params.ts ? { ts: params.ts } : {}),
         ...(taskPatch ? { task: taskPatch } : {}),
+        ...(params.proofCheckpoint ? { proofCheckpoint: params.proofCheckpoint } : {}),
         ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
       };
     case "qa":

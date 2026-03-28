@@ -7,6 +7,7 @@ import {
   TASK_ACTIVATION_LANE_DEADLINE_MS,
   TASK_ACTIVATION_START_DEADLINE_MS,
   TASK_LEDGER_SCHEMA,
+  TASK_PROOF_CHECKPOINT_METADATA_KEY,
   publishTaskLedgerEvents,
   readTaskLedgerEvents,
   readTaskLedgerSnapshot,
@@ -1023,6 +1024,182 @@ describe("task ledger", () => {
       expect(activationNotes).toEqual(expectedMisses);
     },
   );
+
+  it("projects structured proof checkpoints into snapshot task metadata", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-proof-1",
+            title: "Checkpointed implementation",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T16:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-proof-1",
+            summary: "Working",
+          },
+          ts: "2026-03-15T16:00:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-proof-1",
+          summary: "Captured proof checkpoint after landing the core reconcile changes.",
+          actor: { type: "agent", id: "forge" },
+          proofCheckpoint: {
+            files: ["src/infra/task-ledger.ts", "src/infra/task-ledger.test.ts"],
+            diffSummary: "Adds proof-checkpoint enforcement to reconcile and snapshot projection.",
+            tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+            reviewSignal: "Maintainer review requested",
+          },
+          ts: "2026-03-15T16:05:00.000Z",
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const proof = snapshot.tasks[0]?.metadata[TASK_PROOF_CHECKPOINT_METADATA_KEY] as Record<
+      string,
+      unknown
+    >;
+
+    expect(proof).toMatchObject({
+      version: 1,
+      lastCheckpointAt: "2026-03-15T16:05:00.000Z",
+      lastCheckpoint: {
+        files: ["src/infra/task-ledger.ts", "src/infra/task-ledger.test.ts"],
+        diffSummary: "Adds proof-checkpoint enforcement to reconcile and snapshot projection.",
+        tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+        reviewSignal: "Maintainer review requested",
+      },
+      statusOnlyUpdateCount: 0,
+    });
+    expect(proof.prompt).toBeUndefined();
+  });
+
+  it("emits a structured proof checkpoint prompt for repeated status-only in-progress notes", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-proof-2",
+            title: "Proofless status loop",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T17:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-proof-2",
+            summary: "Implementing",
+          },
+          ts: "2026-03-15T17:00:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-proof-2",
+          summary: "Still working through the implementation details.",
+          actor: { type: "agent", id: "forge" },
+          ts: "2026-03-15T17:03:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-proof-2",
+          summary: "Continuing work and will share another update soon.",
+          actor: { type: "agent", id: "forge" },
+          ts: "2026-03-15T17:07:00.000Z",
+        },
+      ],
+    });
+
+    const promptSnapshot = await readTaskLedgerSnapshot({ stateDir });
+    const promptState = promptSnapshot.tasks[0]?.metadata[TASK_PROOF_CHECKPOINT_METADATA_KEY] as
+      | Record<string, unknown>
+      | undefined;
+    const promptEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-proof-2" });
+    const reconcilePrompts = promptEvents.filter(
+      (event) =>
+        event.entity === "task" &&
+        event.kind === "note" &&
+        event.actor.id === "task-ledger-reconciler" &&
+        event.summary.startsWith("Proof checkpoint required:"),
+    );
+
+    expect(reconcilePrompts).toHaveLength(1);
+    expect(promptState).toMatchObject({
+      version: 1,
+      statusOnlyUpdateCount: 2,
+      lastStatusNoteAt: "2026-03-15T17:07:00.000Z",
+      prompt: {
+        required: true,
+        reason: "status_loop",
+        requestedAt: "2026-03-15T17:07:00.000Z",
+        requiredSignals: ["files", "diffSummary", "tests", "reviewSignal"],
+      },
+    });
+    expect(promptState?.lastCheckpointAt).toBeUndefined();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-proof-2",
+          summary: "Proof checkpoint after editing the reconcile path.",
+          actor: { type: "agent", id: "forge" },
+          proofCheckpoint: {
+            files: ["src/infra/task-ledger.ts"],
+            diffSummary: "Adds proof-checkpoint-required reconcile notes for in-progress loops.",
+            tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+          },
+          ts: "2026-03-15T17:12:00.000Z",
+        },
+      ],
+    });
+
+    const clearedSnapshot = await readTaskLedgerSnapshot({ stateDir });
+    const clearedState = clearedSnapshot.tasks[0]?.metadata[TASK_PROOF_CHECKPOINT_METADATA_KEY] as
+      | Record<string, unknown>
+      | undefined;
+
+    expect(clearedState).toMatchObject({
+      version: 1,
+      lastCheckpointAt: "2026-03-15T17:12:00.000Z",
+      lastCheckpoint: {
+        files: ["src/infra/task-ledger.ts"],
+        diffSummary: "Adds proof-checkpoint-required reconcile notes for in-progress loops.",
+        tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+      },
+      statusOnlyUpdateCount: 0,
+    });
+    expect(clearedState?.prompt).toBeUndefined();
+  });
 
   it("emits reconcile evidence when an active agent points at a task that is still todo", async () => {
     const stateDir = await createStateDir();

@@ -71,6 +71,38 @@ describe("task-ledger task milestones", () => {
     });
   });
 
+  it("publishes structured proof checkpoints as milestone notes", () => {
+    const update = buildTaskLifecycleMilestoneUpdate(
+      makeLifecycleEvent(
+        "proof_checkpoint",
+        {
+          files: ["src/infra/task-ledger.ts", "src/infra/task-ledger.test.ts"],
+          diffSummary: "Adds proof-checkpoint enforcement to reconcile.",
+          tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+          reviewSignal: "Maintainer review requested",
+        },
+        {
+          sessionKey: "agent:forge:main",
+          currentTaskId: "task-42",
+        },
+      ),
+    );
+
+    expect(update).toMatchObject({
+      action: "note",
+      taskId: "task-42",
+      summary:
+        "Milestone update: proof checkpoint captured with files src/infra/task-ledger.ts, src/infra/task-ledger.test.ts; diff Adds proof-checkpoint enforcement to reconcile.; tests pnpm test -- src/infra/task-ledger.test.ts; review Maintainer review requested.",
+      proofCheckpoint: {
+        files: ["src/infra/task-ledger.ts", "src/infra/task-ledger.test.ts"],
+        diffSummary: "Adds proof-checkpoint enforcement to reconcile.",
+        tests: ["pnpm test -- src/infra/task-ledger.test.ts"],
+        reviewSignal: "Maintainer review requested",
+      },
+      idempotencyKey: "task-milestone:proof-checkpoint:task-42:run-1:7",
+    });
+  });
+
   it("publishes waiting-for-input milestones for blocked terminal states", () => {
     const update = buildTaskLifecycleMilestoneUpdate(
       makeLifecycleEvent(

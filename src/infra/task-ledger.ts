@@ -10,6 +10,7 @@ export const TASK_STATES = ["backlog", "todo", "in_progress", "qa", "done", "blo
 export const TASK_PRIORITIES = ["low", "medium", "high", "critical"] as const;
 export const AGENT_ACTIVITY_STATUSES = ["idle", "running", "waiting", "blocked"] as const;
 export const TASK_ACTIVATION_SLA_METADATA_KEY = "activationSla" as const;
+export const TASK_PROOF_CHECKPOINT_METADATA_KEY = "proofCheckpoint" as const;
 export const TASK_ACTIVATION_ACK_DEADLINE_MS = 5 * 60_000;
 export const TASK_ACTIVATION_LANE_DEADLINE_MS = 10 * 60_000;
 export const TASK_ACTIVATION_START_DEADLINE_MS = 15 * 60_000;
@@ -22,6 +23,14 @@ const RECONCILE_ACTOR_ID = "task-ledger-reconciler";
 const RECONCILE_ACTOR_NAME = "Task ledger reconciler";
 const RECONCILE_IDEMPOTENCY_PREFIX = "reconcile";
 const RECONCILE_AGENT_STALE_MS = 15 * 60_000;
+const PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES = 2;
+export type TaskProofCheckpointSignalType = "files" | "diffSummary" | "tests" | "reviewSignal";
+const TASK_PROOF_CHECKPOINT_SIGNAL_TYPES = [
+  "files",
+  "diffSummary",
+  "tests",
+  "reviewSignal",
+] as const satisfies readonly TaskProofCheckpointSignalType[];
 
 export class TaskLedgerPublishInputError extends Error {}
 const taskLedgerLock = createAsyncLock();
@@ -67,6 +76,31 @@ type TaskActivationEvidence = {
   startDisposition?: TaskActivationDisposition;
   startDispositionAt?: string;
   startDispositionReason?: string;
+};
+
+export type TaskProofCheckpoint = {
+  files?: string[];
+  diffSummary?: string;
+  tests?: string[];
+  reviewSignal?: string;
+};
+
+export type TaskProofCheckpointState = {
+  version: 1;
+  lastCheckpointAt?: string;
+  lastCheckpoint?: TaskProofCheckpoint;
+  statusOnlyUpdateCount: number;
+  lastStatusNoteAt?: string;
+  prompt?: {
+    required: true;
+    reason: "status_loop";
+    requestedAt: string;
+    requiredSignals: TaskProofCheckpointSignalType[];
+  };
+};
+
+type TaskProofCheckpointEvidence = TaskProofCheckpointState & {
+  currentCycleStartedAt?: string;
 };
 
 export type TaskState = (typeof TASK_STATES)[number];
@@ -135,6 +169,7 @@ export type TaskLedgerTaskRecord = {
   fromState?: TaskState;
   toState?: TaskState;
   task?: Partial<Omit<TaskLedgerTask, "id" | "lastEventAt">>;
+  proofCheckpoint?: TaskProofCheckpoint;
   idempotencyKey?: string;
 };
 
@@ -242,6 +277,7 @@ export type TaskLedgerTaskNoteInput = {
   ts?: string;
   state?: TaskState;
   task?: TaskLedgerTaskPatch;
+  proofCheckpoint?: TaskProofCheckpoint;
   idempotencyKey?: string;
 };
 
@@ -420,6 +456,65 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(stableValue(value));
 }
 
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (typeof value === "string") {
+    const normalized = trimToUndefined(value);
+    return normalized ? [normalized] : undefined;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized = value.flatMap((entry) => {
+    const next = trimToUndefined(entry);
+    return next ? [next] : [];
+  });
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeTaskProofCheckpointInput(value: unknown): TaskProofCheckpoint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("proof checkpoint must be an object");
+  }
+
+  const raw = value as Record<string, unknown>;
+  const files = normalizeStringList(raw.files);
+  const diffSummary = trimToUndefined(raw.diffSummary);
+  const tests = normalizeStringList(raw.tests);
+  const reviewSignal = trimToUndefined(raw.reviewSignal ?? raw.review);
+  const checkpoint: TaskProofCheckpoint = {
+    ...(files ? { files } : {}),
+    ...(diffSummary ? { diffSummary } : {}),
+    ...(tests ? { tests } : {}),
+    ...(reviewSignal ? { reviewSignal } : {}),
+  };
+
+  if (!hasConcreteTaskProofCheckpoint(checkpoint)) {
+    throw new Error("proof checkpoint requires files, diffSummary, tests, or reviewSignal");
+  }
+
+  return checkpoint;
+}
+
+function parsePersistedTaskProofCheckpoint(value: unknown): TaskProofCheckpoint | undefined {
+  try {
+    return normalizeTaskProofCheckpointInput(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function hasConcreteTaskProofCheckpoint(
+  value: TaskProofCheckpoint | undefined,
+): value is TaskProofCheckpoint {
+  return (
+    value !== undefined &&
+    ((value.files?.length ?? 0) > 0 ||
+      !!trimToUndefined(value.diffSummary) ||
+      (value.tests?.length ?? 0) > 0 ||
+      !!trimToUndefined(value.reviewSignal))
+  );
+}
+
 function addDeadline(ts: string, deltaMs: number): string {
   const parsed = Date.parse(ts);
   if (!Number.isFinite(parsed)) {
@@ -576,6 +671,21 @@ function metadataChanged(
     return true;
   }
   return stableStringify(existing?.metadata ?? {}) !== stableStringify(next.metadata);
+}
+
+function withTaskProofCheckpointMetadata(
+  metadata: Record<string, unknown>,
+  proofCheckpoint: TaskProofCheckpointState | undefined,
+): Record<string, unknown> {
+  const next = normalizeMetadata(metadata);
+  if (!proofCheckpoint) {
+    if (Object.hasOwn(next, TASK_PROOF_CHECKPOINT_METADATA_KEY)) {
+      delete next[TASK_PROOF_CHECKPOINT_METADATA_KEY];
+    }
+    return next;
+  }
+  next[TASK_PROOF_CHECKPOINT_METADATA_KEY] = proofCheckpoint;
+  return next;
 }
 
 function resolveTaskLedgerPaths(stateDir = resolveStateDir()) {
@@ -787,6 +897,7 @@ function getRecordDedupSignature(record: TaskLedgerRecord): string {
       actor: record.actor,
       toState: record.toState,
       task: record.task ?? {},
+      proofCheckpoint: record.proofCheckpoint,
     });
   }
   if (record.entity === "agent") {
@@ -920,6 +1031,7 @@ function createSnapshotFromRecords(params: {
 }): TaskLedgerSnapshot {
   const materialized = materializeLedgerState(params.records);
   applyDerivedTaskActivationEvidence(materialized);
+  applyDerivedTaskProofCheckpointEvidence(materialized);
   const recentLimit =
     typeof params.recentEventLimit === "number" && params.recentEventLimit > 0
       ? Math.floor(params.recentEventLimit)
@@ -1130,6 +1242,130 @@ function applyDerivedTaskActivationEvidence(materialized: MaterializedLedgerStat
   }
 }
 
+function resolveTaskRecordState(
+  record: TaskLedgerTaskRecord,
+  currentState: TaskState | undefined,
+): TaskState | undefined {
+  if (isTaskState(record.toState)) {
+    return record.toState;
+  }
+  return isTaskState(record.task?.state) ? record.task.state : currentState;
+}
+
+function hasTaskPatchFields(record: TaskLedgerTaskRecord): boolean {
+  return record.task !== undefined && Object.keys(record.task).length > 0;
+}
+
+function isStatusOnlyAgentTaskNote(record: TaskLedgerTaskRecord): boolean {
+  return (
+    record.kind === "note" &&
+    record.actor.type === "agent" &&
+    !isReconcileTaskNote(record) &&
+    !hasConcreteTaskProofCheckpoint(record.proofCheckpoint) &&
+    !record.toState &&
+    !hasTaskPatchFields(record)
+  );
+}
+
+function isProofCheckpointPromptRecord(record: TaskLedgerTaskRecord): boolean {
+  return (
+    isReconcileTaskNote(record) &&
+    trimToUndefined(record.idempotencyKey)?.startsWith("reconcile:proof-checkpoint-required:") ===
+      true
+  );
+}
+
+function deriveTaskProofCheckpointEvidence(
+  task: TaskLedgerTask,
+  records: TaskLedgerRecord[],
+): TaskProofCheckpointEvidence | null {
+  let currentState: TaskState | undefined;
+  let currentCycleStartedAt: string | undefined;
+  let lastCheckpointAt: string | undefined;
+  let lastCheckpoint: TaskProofCheckpoint | undefined;
+  let statusOnlyUpdateCount = 0;
+  let lastStatusNoteAt: string | undefined;
+  let prompt: TaskProofCheckpointState["prompt"];
+
+  for (const record of records) {
+    if (record.entity !== "task" || record.taskId !== task.id) {
+      continue;
+    }
+
+    const nextState = resolveTaskRecordState(record, currentState);
+    const enteredInProgress = nextState === "in_progress" && currentState !== "in_progress";
+    const leftInProgress = currentState === "in_progress" && nextState !== "in_progress";
+
+    if (enteredInProgress) {
+      currentCycleStartedAt = record.ts;
+      statusOnlyUpdateCount = 0;
+      lastStatusNoteAt = undefined;
+      prompt = undefined;
+    } else if (leftInProgress) {
+      currentCycleStartedAt = undefined;
+      statusOnlyUpdateCount = 0;
+      lastStatusNoteAt = undefined;
+      prompt = undefined;
+    }
+
+    currentState = nextState;
+
+    if (hasConcreteTaskProofCheckpoint(record.proofCheckpoint)) {
+      lastCheckpointAt = record.ts;
+      lastCheckpoint = record.proofCheckpoint;
+      statusOnlyUpdateCount = 0;
+      lastStatusNoteAt = undefined;
+      prompt = undefined;
+      continue;
+    }
+
+    if (currentState !== "in_progress") {
+      continue;
+    }
+
+    if (isStatusOnlyAgentTaskNote(record)) {
+      statusOnlyUpdateCount += 1;
+      lastStatusNoteAt = record.ts;
+      continue;
+    }
+
+    if (isProofCheckpointPromptRecord(record)) {
+      prompt = {
+        required: true,
+        reason: "status_loop",
+        requestedAt: record.ts,
+        requiredSignals: [...TASK_PROOF_CHECKPOINT_SIGNAL_TYPES],
+      };
+    }
+  }
+
+  if (!lastCheckpointAt && statusOnlyUpdateCount === 0 && !prompt) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    ...(currentCycleStartedAt ? { currentCycleStartedAt } : {}),
+    ...(lastCheckpointAt ? { lastCheckpointAt } : {}),
+    ...(lastCheckpoint ? { lastCheckpoint } : {}),
+    statusOnlyUpdateCount,
+    ...(lastStatusNoteAt ? { lastStatusNoteAt } : {}),
+    ...(prompt ? { prompt } : {}),
+  };
+}
+
+function applyDerivedTaskProofCheckpointEvidence(materialized: MaterializedLedgerState) {
+  for (const task of materialized.tasks.values()) {
+    const evidence = deriveTaskProofCheckpointEvidence(task, materialized.appliedRecords);
+    if (!evidence) {
+      task.metadata = withTaskProofCheckpointMetadata(task.metadata, undefined);
+      continue;
+    }
+    const { currentCycleStartedAt: _currentCycleStartedAt, ...persistedEvidence } = evidence;
+    task.metadata = withTaskProofCheckpointMetadata(task.metadata, persistedEvidence);
+  }
+}
+
 function buildReconcileIdempotencyKey(kind: string, parts: Array<string | undefined>): string {
   return `${RECONCILE_IDEMPOTENCY_PREFIX}:${kind}:${parts
     .map((part) => trimToUndefined(part) ?? "none")
@@ -1182,6 +1418,7 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
 
   const notes: TaskLedgerTaskRecord[] = [];
   const activationEvidenceByTaskId = new Map<string, TaskActivationEvidence>();
+  const proofCheckpointByTaskId = new Map<string, TaskProofCheckpointEvidence>();
   const activeWorkByAgentId = new Map<
     string,
     { taskId: string; tsMs: number; referenceId: string; source: "task" | "heartbeat" }
@@ -1227,6 +1464,13 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     if (activationEvidence) {
       activationEvidenceByTaskId.set(task.id, activationEvidence);
     }
+    const proofCheckpointEvidence = deriveTaskProofCheckpointEvidence(
+      task,
+      materialized.appliedRecords,
+    );
+    if (proofCheckpointEvidence) {
+      proofCheckpointByTaskId.set(task.id, proofCheckpointEvidence);
+    }
   }
 
   for (const task of materialized.tasks.values()) {
@@ -1235,6 +1479,7 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     const taskRecordId = taskRecord?.id;
     const taskTsMs = taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt);
     const activationEvidence = activationEvidenceByTaskId.get(task.id);
+    const proofCheckpointEvidence = proofCheckpointByTaskId.get(task.id);
 
     if (task.state === "in_progress" && assignedAgent) {
       considerActiveWork(assignedAgent, {
@@ -1353,6 +1598,24 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
           activation.startDeadlineAt,
         );
       }
+    }
+
+    if (
+      task.state === "in_progress" &&
+      proofCheckpointEvidence &&
+      proofCheckpointEvidence.statusOnlyUpdateCount >= PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES &&
+      !proofCheckpointEvidence.prompt
+    ) {
+      queueTaskNote(
+        task.id,
+        `Proof checkpoint required: task is still in progress, but the latest ${proofCheckpointEvidence.statusOnlyUpdateCount} agent updates are status-only with no concrete proof of work. Record a proof checkpoint with files touched, diff summary, tests run, or review signal before sending another status-only update.`,
+        buildReconcileIdempotencyKey("proof-checkpoint-required", [
+          task.id,
+          trimToUndefined(task.assignedAgent) ?? "unassigned",
+          proofCheckpointEvidence.lastCheckpointAt ?? proofCheckpointEvidence.currentCycleStartedAt,
+        ]),
+        proofCheckpointEvidence.lastStatusNoteAt,
+      );
     }
   }
 
@@ -1528,6 +1791,7 @@ function parsePersistedTaskRecord(value: Record<string, unknown>): TaskLedgerTas
       ? (value.task as TaskLedgerTaskPatch)
       : undefined,
   );
+  const proofCheckpoint = parsePersistedTaskProofCheckpoint(value.proofCheckpoint);
   return {
     schema: TASK_LEDGER_SCHEMA,
     id,
@@ -1544,6 +1808,7 @@ function parsePersistedTaskRecord(value: Record<string, unknown>): TaskLedgerTas
     ...(isTaskState(value.fromState) ? { fromState: value.fromState } : {}),
     ...(isTaskState(value.toState) ? { toState: value.toState } : {}),
     ...(Object.keys(task).length > 0 ? { task } : {}),
+    ...(proofCheckpoint ? { proofCheckpoint } : {}),
     ...(normalizeIdempotencyKey(value.idempotencyKey)
       ? { idempotencyKey: normalizeIdempotencyKey(value.idempotencyKey) }
       : {}),
@@ -1844,6 +2109,10 @@ function normalizeTaskNoteRecord(
     throw new Error(`task ${taskId} not found and no title provided`);
   }
   const toState = isTaskState(input.state) ? input.state : undefined;
+  const proofCheckpoint =
+    input.proofCheckpoint === undefined
+      ? undefined
+      : normalizeTaskProofCheckpointInput(input.proofCheckpoint);
   const next = buildTaskWithActivationMetadata(
     existing,
     {
@@ -1875,6 +2144,7 @@ function normalizeTaskNoteRecord(
         : {}),
       ...(metadataChanged(existing, next, patch) ? { metadata: next.metadata } : {}),
     },
+    ...(proofCheckpoint ? { proofCheckpoint } : {}),
     ...(normalizeIdempotencyKey(input.idempotencyKey)
       ? { idempotencyKey: normalizeIdempotencyKey(input.idempotencyKey) }
       : {}),
@@ -1945,7 +2215,7 @@ function normalizeRecallRecord(input: TaskLedgerRecallTraceInput): TaskLedgerRec
     kind: "trace",
     sessionKey: normalizeLedgerId(input.sessionKey, "recall session key"),
     agentId: normalizeLedgerId(input.agentId, "recall agent id"),
-    ran: input.ran === true,
+    ran: input.ran,
     ...(trimToUndefined(input.skippedReason)
       ? { skippedReason: trimToUndefined(input.skippedReason) }
       : {}),

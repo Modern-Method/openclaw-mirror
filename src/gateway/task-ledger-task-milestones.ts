@@ -4,6 +4,7 @@ import {
   type AgentEventPayload,
   type AgentRunContext,
 } from "../infra/agent-events.js";
+import type { TaskProofCheckpoint } from "../infra/task-ledger.js";
 import {
   publishTaskLifecycleEvent,
   type TaskLifecyclePublishInput,
@@ -69,6 +70,54 @@ function buildRepeatedFailureSummary(error: unknown): string {
   return `Milestone update: the active run hit repeated failures and needs attention. Latest error: ${safeError}`;
 }
 
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (typeof value === "string") {
+    const normalized = trimToUndefined(value);
+    return normalized ? [normalized] : undefined;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const normalized = value.flatMap((entry) => {
+    const next = trimToUndefined(entry);
+    return next ? [next] : [];
+  });
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeProofCheckpoint(data: Record<string, unknown>): TaskProofCheckpoint | undefined {
+  const files = normalizeStringList(data.files);
+  const diffSummary = trimToUndefined(data.diffSummary);
+  const tests = normalizeStringList(data.tests);
+  const reviewSignal = trimToUndefined(data.reviewSignal ?? data.review);
+  if (!files && !diffSummary && !tests && !reviewSignal) {
+    return undefined;
+  }
+  return {
+    ...(files ? { files } : {}),
+    ...(diffSummary ? { diffSummary } : {}),
+    ...(tests ? { tests } : {}),
+    ...(reviewSignal ? { reviewSignal } : {}),
+  };
+}
+
+function buildProofCheckpointSummary(proofCheckpoint: TaskProofCheckpoint): string {
+  const details: string[] = [];
+  if ((proofCheckpoint.files?.length ?? 0) > 0) {
+    details.push(`files ${proofCheckpoint.files?.join(", ")}`);
+  }
+  if (proofCheckpoint.diffSummary) {
+    details.push(`diff ${proofCheckpoint.diffSummary}`);
+  }
+  if ((proofCheckpoint.tests?.length ?? 0) > 0) {
+    details.push(`tests ${proofCheckpoint.tests?.join(", ")}`);
+  }
+  if (proofCheckpoint.reviewSignal) {
+    details.push(`review ${proofCheckpoint.reviewSignal}`);
+  }
+  return `Milestone update: proof checkpoint captured with ${details.join("; ")}.`;
+}
+
 function resolveLifecycleMilestone(params: {
   evt: AgentEventPayload;
   runContext: AgentRunContext;
@@ -77,6 +126,7 @@ function resolveLifecycleMilestone(params: {
   kind: string;
   summary: string;
   idempotencyKey: string;
+  proofCheckpoint?: TaskProofCheckpoint;
 } | null {
   const { evt, runContext, taskId } = params;
   const phase = normalizeLifecyclePhase(evt.data?.phase);
@@ -106,6 +156,18 @@ function resolveLifecycleMilestone(params: {
         kind: "fallback",
         summary,
         idempotencyKey: `task-milestone:fallback:${taskId}:${evt.runId}:${model ?? "unknown"}:${reason ?? "none"}`,
+      };
+    }
+    case "proof_checkpoint": {
+      const proofCheckpoint = normalizeProofCheckpoint(evt.data);
+      if (!proofCheckpoint) {
+        return null;
+      }
+      return {
+        kind: "proof_checkpoint",
+        summary: buildProofCheckpointSummary(proofCheckpoint),
+        proofCheckpoint,
+        idempotencyKey: `task-milestone:proof-checkpoint:${taskId}:${evt.runId}:${evt.seq}`,
       };
     }
     case "end":
@@ -176,6 +238,7 @@ export function buildTaskLifecycleMilestoneUpdate(
     summary: milestone.summary,
     actor: TASK_MILESTONE_ACTOR,
     ts: tsValue.toISOString(),
+    ...(milestone.proofCheckpoint ? { proofCheckpoint: milestone.proofCheckpoint } : {}),
     idempotencyKey: milestone.idempotencyKey,
   };
 }
