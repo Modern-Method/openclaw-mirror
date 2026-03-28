@@ -1228,10 +1228,11 @@ describe("task ledger", () => {
     const promptState = promptSnapshot.tasks[0]?.metadata[TASK_PROOF_CHECKPOINT_METADATA_KEY] as
       | Record<string, unknown>
       | undefined;
-    const promptEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-proof-2" });
+    const promptEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-proof-2" })).filter(
+      isTaskRecord,
+    );
     const reconcilePrompts = promptEvents.filter(
       (event) =>
-        event.entity === "task" &&
         event.kind === "note" &&
         event.actor.id === "task-ledger-reconciler" &&
         event.summary.startsWith("Proof checkpoint required:"),
@@ -1281,18 +1282,14 @@ describe("task ledger", () => {
     const escalatedOwnershipState = escalatedSnapshot.tasks[0]?.metadata[
       TASK_OWNERSHIP_ESCALATION_METADATA_KEY
     ] as Record<string, unknown> | undefined;
-    const escalatedEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-proof-2" });
+    const escalatedEvents = (
+      await readTaskLedgerEvents({ stateDir, taskId: "task-proof-2" })
+    ).filter(isTaskRecord);
     const ownershipEscalationNote = escalatedEvents.find(
-      (event) =>
-        event.entity === "task" &&
-        event.kind === "note" &&
-        event.summary.startsWith("Ownership escalation:"),
+      (event) => event.kind === "note" && event.summary.startsWith("Ownership escalation:"),
     );
     const ownershipReassignNote = escalatedEvents.find(
-      (event) =>
-        event.entity === "task" &&
-        event.kind === "note" &&
-        event.summary.startsWith("Ownership reassignment ready:"),
+      (event) => event.kind === "note" && event.summary.startsWith("Ownership reassignment ready:"),
     );
 
     expect(ownershipEscalationNote?.summary).toContain("4 consecutive status-only updates");
@@ -1602,7 +1599,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const taskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     const staleEvent = taskEvents.find((event) => /latest heartbeat is stale/i.test(event.summary));
 
@@ -1703,7 +1702,9 @@ describe("task ledger", () => {
       ],
     });
 
-    const blockedTaskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const blockedTaskEvents = (await readTaskLedgerEvents({ stateDir, taskId: "task-1" })).filter(
+      isTaskRecord,
+    );
 
     const supersededEvent = blockedTaskEvents.find((event) =>
       /newer active work exists on task-2/i.test(event.summary),

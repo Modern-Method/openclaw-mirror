@@ -1859,7 +1859,8 @@ function deriveTaskOwnershipEscalationState(
     return null;
   }
 
-  if (level === "reassignment_ready" && !takeover) {
+  const needsTakeover = triggers.some((trigger) => trigger.level === "reassignment_ready");
+  if (needsTakeover && !takeover) {
     takeover = {
       recommended: true,
       through: "task_ledger",
