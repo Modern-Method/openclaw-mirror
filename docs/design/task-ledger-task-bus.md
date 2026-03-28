@@ -210,6 +210,23 @@ Operational truth should be explainable from the ledger events.
 
 Mission Control consumes the ledger as an operator projection.
 
+### Native ingest and sync contract
+
+There is no separate Mission Control-native `/api/v1/activities` bridge in the
+current OpenClaw stack, and there is no Phoenix route tree in this repository.
+
+The current contract is:
+- runtime/automation activity is written into the canonical ledger by the
+  gateway-side task-ledger publishers and lifecycle listeners
+- explicit operator or integration writes go through the gateway RPC method
+  `tasks.publish`
+- Mission Control reads current state from `tasks.snapshot`
+- Mission Control reads/replays history from `tasks.events`
+- live subscribers listen for `tasks.ledger` broadcasts after accepted writes
+
+That keeps the task ledger as the source of truth and keeps Mission Control as
+the projection/control surface over that truth.
+
 ### It should rely on the ledger for:
 - board columns / task state
 - assigned agent and worktree context
@@ -281,6 +298,13 @@ Mercury can use a different UI, but the pattern should stay:
 - ledger events
 - snapshot projection
 - operator-facing surface built on projections
+
+If Mercury uses Phoenix/LiveView for its dashboard, that does **not** imply the
+OpenClaw-era dashboard bridge should come back. The dashboard can be Phoenix-
+native while still consuming a canonical ledger write/read contract underneath.
+If Mercury eventually needs an explicit ingest endpoint, that endpoint should
+feed the canonical publisher/snapshot pipeline rather than becoming a parallel
+source of task/activity truth.
 
 ### 6. Memory bridge as a downstream consumer
 

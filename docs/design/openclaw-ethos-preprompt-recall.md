@@ -480,15 +480,17 @@ turning the UI into a prompt dump or leaking raw Ethos metadata.
     of a dedicated trace channel
 
 #### Mission Control
-- `lib/mission_control/ops/shared_sync.ex`
-  - ingest/sync the new recall trace records into Mission Control state
-- `lib/mission_control/ops.ex`
-  - add a read model for recall traces / recent memory decisions
-- `lib/mission_control_web/live/dashboard_live.ex`
-  - render trace rows/cards/toggles in the operator surface
-- Mission Control tests:
-  - `test/mission_control/ops_test.exs`
-  - `test/mission_control_web/live/dashboard_live_test.exs`
+- gateway task-ledger sync surfaces
+  - `src/gateway/server-methods/tasks.ts`
+  - extend `tasks.snapshot` / `tasks.events` consumers if Mission Control needs
+    to show recall traces alongside the existing ledger projection
+- gateway task-ledger write path
+  - `src/infra/task-ledger.ts`
+  - keep recall observability on the canonical ledger/event substrate rather
+    than introducing a dashboard-specific ingest API
+- Mission Control/gateway tests:
+  - `src/gateway/server-methods/tasks.test.ts`
+  - `src/commands/orchestrator-smoke.test.ts`
 
 ### Required implementation behaviors
 
@@ -518,7 +520,11 @@ turning the UI into a prompt dump or leaking raw Ethos metadata.
 ### Acceptance gates
 
 - runtime emits a structured recall trace record for every recall decision
-- Mission Control sync path can ingest/display those traces
+- Mission Control sync path can ingest/display those traces through the
+  existing `tasks.snapshot` / `tasks.events` surfaces
+- If Mercury later uses Phoenix for its dashboard, preserve the same contract:
+  Phoenix can be the projection/operator UI, but the canonical activity/task
+  truth should still flow through a ledger publisher + snapshot/events model
 - UI shows at minimum:
   - agent
   - session/thread context

@@ -34,6 +34,98 @@ afterEach(async () => {
 });
 
 describe("tasks gateway handlers", () => {
+  it("uses tasks.publish as the write path and tasks.snapshot/tasks.events as the sync surfaces", async () => {
+    await createStateDir();
+    const publishRespond = vi.fn();
+    const snapshotRespond = vi.fn();
+    const eventsRespond = vi.fn();
+    const context = makeContext();
+
+    await tasksHandlers["tasks.publish"]({
+      req: {} as never,
+      params: {
+        events: [
+          {
+            entity: "task",
+            kind: "upsert",
+            task: { id: "task-1", title: "Trace Mission Control ingest", state: "in_progress" },
+          },
+          {
+            entity: "agent",
+            kind: "heartbeat",
+            agent: {
+              id: "forge",
+              status: "running",
+              currentTaskId: "task-1",
+              summary: "Syncing through the task ledger",
+            },
+          },
+        ],
+      },
+      respond: publishRespond as never,
+      context,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await tasksHandlers["tasks.snapshot"]({
+      req: {} as never,
+      params: { recentEventLimit: 10 },
+      respond: snapshotRespond as never,
+      context,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    await tasksHandlers["tasks.events"]({
+      req: {} as never,
+      params: { taskId: "task-1", limit: 10 },
+      respond: eventsRespond as never,
+      context,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expect(publishRespond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        accepted: expect.any(Number),
+        events: expect.arrayContaining([
+          expect.objectContaining({ entity: "task", taskId: "task-1" }),
+          expect.objectContaining({ entity: "agent", agentId: "forge" }),
+        ]),
+      }),
+      undefined,
+    );
+    expect(snapshotRespond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        tasks: [expect.objectContaining({ id: "task-1", state: "in_progress" })],
+        agents: [
+          expect.objectContaining({
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-1",
+          }),
+        ],
+        recentEvents: expect.arrayContaining([
+          expect.objectContaining({ entity: "task", taskId: "task-1" }),
+          expect.objectContaining({ entity: "agent", agentId: "forge" }),
+        ]),
+      }),
+      undefined,
+    );
+    expect(eventsRespond).toHaveBeenCalledWith(
+      true,
+      {
+        events: expect.arrayContaining([
+          expect.objectContaining({ entity: "task", taskId: "task-1" }),
+        ]),
+      },
+      undefined,
+    );
+  });
+
   it("publishes events, broadcasts them, and returns a snapshot", async () => {
     await createStateDir();
     const respond = vi.fn();
