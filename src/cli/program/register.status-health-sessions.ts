@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { healthCommand } from "../../commands/health.js";
+import { orchestratorSmokeCommand } from "../../commands/orchestrator-smoke.js";
 import { sessionsCleanupCommand } from "../../commands/sessions-cleanup.js";
 import { sessionsCommand } from "../../commands/sessions.js";
 import { statusCommand } from "../../commands/status.js";
@@ -41,6 +42,37 @@ async function runWithVerboseAndTimeout(
 }
 
 export function registerStatusHealthSessionsCommands(program: Command) {
+  program
+    .command("smoke")
+    .description("Run the orchestrator smoke check")
+    .option("--json", "Output JSON instead of text", false)
+    .option("--timeout <ms>", "Probe timeout in milliseconds", "5000")
+    .option("--verbose", "Verbose logging", false)
+    .option("--debug", "Alias for --verbose", false)
+    .addHelpText(
+      "after",
+      () =>
+        `\n${theme.heading("Examples:")}\n${formatHelpExamples([
+          [
+            "openclaw smoke",
+            "Check gateway reachability, ledger freshness, Mission Control sync, and Ethos search.",
+          ],
+          ["openclaw smoke --json", "Machine-readable output."],
+          ["openclaw smoke --timeout 10000", "Allow slower gateway and Ethos probes."],
+        ])}`,
+    )
+    .action(async (opts) => {
+      await runWithVerboseAndTimeout(opts, async ({ timeoutMs }) => {
+        await orchestratorSmokeCommand(
+          {
+            json: Boolean(opts.json),
+            timeoutMs,
+          },
+          defaultRuntime,
+        );
+      });
+    });
+
   program
     .command("status")
     .description("Show channel health and recent session recipients")

@@ -4,6 +4,7 @@ import { createCliRuntimeCapture } from "../test-runtime-capture.js";
 
 const statusCommand = vi.fn();
 const healthCommand = vi.fn();
+const orchestratorSmokeCommand = vi.fn();
 const sessionsCommand = vi.fn();
 const sessionsCleanupCommand = vi.fn();
 const setVerbose = vi.fn();
@@ -16,6 +17,10 @@ vi.mock("../../commands/status.js", () => ({
 
 vi.mock("../../commands/health.js", () => ({
   healthCommand,
+}));
+
+vi.mock("../../commands/orchestrator-smoke.js", () => ({
+  orchestratorSmokeCommand,
 }));
 
 vi.mock("../../commands/sessions.js", () => ({
@@ -53,8 +58,32 @@ describe("registerStatusHealthSessionsCommands", () => {
     runtime.exit.mockImplementation(() => {});
     statusCommand.mockResolvedValue(undefined);
     healthCommand.mockResolvedValue(undefined);
+    orchestratorSmokeCommand.mockResolvedValue(undefined);
     sessionsCommand.mockResolvedValue(undefined);
     sessionsCleanupCommand.mockResolvedValue(undefined);
+  });
+
+  it("runs smoke command with parsed timeout", async () => {
+    await runCli(["smoke", "--json", "--timeout", "3000", "--debug"]);
+
+    expect(setVerbose).toHaveBeenCalledWith(true);
+    expect(orchestratorSmokeCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        json: true,
+        timeoutMs: 3000,
+      }),
+      runtime,
+    );
+  });
+
+  it("rejects invalid smoke timeout without calling the smoke command", async () => {
+    await runCli(["smoke", "--timeout", "-1"]);
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      "--timeout must be a positive integer (milliseconds)",
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(orchestratorSmokeCommand).not.toHaveBeenCalled();
   });
 
   it("runs status command with timeout and debug-derived verbose", async () => {

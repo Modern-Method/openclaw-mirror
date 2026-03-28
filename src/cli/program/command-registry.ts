@@ -196,6 +196,11 @@ const coreEntries: CoreCliEntry[] = [
   {
     commands: [
       {
+        name: "smoke",
+        description: "Run the orchestrator smoke check",
+        hasSubcommands: false,
+      },
+      {
         name: "status",
         description: "Show channel health and recent session recipients",
         hasSubcommands: false,

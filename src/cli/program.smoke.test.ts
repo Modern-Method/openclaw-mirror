@@ -49,6 +49,7 @@ describe("cli program (smoke)", () => {
   it("registers memory + status commands", () => {
     const names = program.commands.map((command) => command.name());
     expect(names).toContain("message");
+    expect(names).toContain("smoke");
     expect(names).toContain("memory");
     expect(names).toContain("status");
   });
