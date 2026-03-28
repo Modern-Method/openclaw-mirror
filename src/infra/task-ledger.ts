@@ -11,6 +11,7 @@ export const TASK_PRIORITIES = ["low", "medium", "high", "critical"] as const;
 export const AGENT_ACTIVITY_STATUSES = ["idle", "running", "waiting", "blocked"] as const;
 export const TASK_ACTIVATION_SLA_METADATA_KEY = "activationSla" as const;
 export const TASK_PROOF_CHECKPOINT_METADATA_KEY = "proofCheckpoint" as const;
+export const TASK_OWNERSHIP_ESCALATION_METADATA_KEY = "ownershipEscalation" as const;
 export const TASK_ACTIVATION_ACK_DEADLINE_MS = 5 * 60_000;
 export const TASK_ACTIVATION_LANE_DEADLINE_MS = 10 * 60_000;
 export const TASK_ACTIVATION_START_DEADLINE_MS = 15 * 60_000;
@@ -24,6 +25,10 @@ const RECONCILE_ACTOR_NAME = "Task ledger reconciler";
 const RECONCILE_IDEMPOTENCY_PREFIX = "reconcile";
 const RECONCILE_AGENT_STALE_MS = 15 * 60_000;
 const PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES = 2;
+const OWNERSHIP_ACTIVATION_MISSES_TO_ESCALATE = 2;
+const OWNERSHIP_ACTIVATION_MISSES_TO_REASSIGN = 3;
+const OWNERSHIP_STATUS_ONLY_UPDATES_TO_ESCALATE = PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES + 1;
+const OWNERSHIP_STATUS_ONLY_UPDATES_TO_REASSIGN = PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES + 2;
 export type TaskProofCheckpointSignalType = "files" | "diffSummary" | "tests" | "reviewSignal";
 const TASK_PROOF_CHECKPOINT_SIGNAL_TYPES = [
   "files",
@@ -101,6 +106,84 @@ export type TaskProofCheckpointState = {
 
 type TaskProofCheckpointEvidence = TaskProofCheckpointState & {
   currentCycleStartedAt?: string;
+};
+
+type TaskActivationMissedCheckpoint = "acknowledge" | "lane" | "start";
+
+type TaskOwnershipEscalationLevel = "watch" | "escalated" | "reassignment_ready";
+
+type TaskOwnershipEscalationTriggerCode =
+  | "activation_sla"
+  | "proof_checkpoint"
+  | "assigned_agent_missing"
+  | "assigned_agent_idle"
+  | "assigned_agent_stale"
+  | "heartbeat_claim_mismatch"
+  | "blocked_superseded";
+
+type TaskOwnershipEscalationTrigger = {
+  code: TaskOwnershipEscalationTriggerCode;
+  level: TaskOwnershipEscalationLevel;
+  observedAt: string;
+  summary: string;
+  activationMisses?: {
+    checkpoints: TaskActivationMissedCheckpoint[];
+    missCount: number;
+  };
+  proofCheckpoint?: {
+    statusOnlyUpdateCount: number;
+    promptRequestedAt?: string;
+  };
+  ownership?: {
+    assignedAgent?: string;
+    claimedByAgent?: string;
+    staleHeartbeatAt?: string;
+    supersededByTaskId?: string;
+  };
+};
+
+export type TaskOwnershipEscalationState = {
+  version: 1;
+  sourceOfTruth: "task_ledger";
+  level: TaskOwnershipEscalationLevel;
+  thresholds: {
+    activationMissesToEscalate: number;
+    activationMissesToReassign: number;
+    statusOnlyUpdatesToPrompt: number;
+    statusOnlyUpdatesToEscalate: number;
+    statusOnlyUpdatesToReassign: number;
+    staleHeartbeatMs: number;
+  };
+  triggers: TaskOwnershipEscalationTrigger[];
+  takeover?: {
+    recommended: true;
+    through: "task_ledger";
+    path: "publish_task_assignment";
+    summary: string;
+    currentAssignedAgent?: string;
+    suggestedAgent?: string;
+  };
+};
+
+type ActiveTaskWork = {
+  taskId: string;
+  tsMs: number;
+  referenceId: string;
+  source: "task" | "heartbeat";
+};
+
+type TaskOwnershipObservationContext = {
+  reconciliationTs: string;
+  reconciliationTsMs: number;
+  lastSubstantiveTaskRecordById: Map<string, TaskLedgerTaskRecord>;
+  lastAgentRecordById: Map<string, TaskLedgerAgentRecord>;
+  activationEvidenceByTaskId: Map<string, TaskActivationEvidence>;
+  proofCheckpointByTaskId: Map<string, TaskProofCheckpointEvidence>;
+  activeWorkByAgentId: Map<string, ActiveTaskWork>;
+  heartbeatClaimantsByTaskId: Map<
+    string,
+    Array<{ agentId: string; status: AgentActivityStatus; heartbeatAt: string }>
+  >;
 };
 
 export type TaskState = (typeof TASK_STATES)[number];
@@ -696,6 +779,21 @@ function withTaskProofCheckpointMetadata(
   return next;
 }
 
+function withTaskOwnershipEscalationMetadata(
+  metadata: Record<string, unknown>,
+  escalation: TaskOwnershipEscalationState | undefined,
+): Record<string, unknown> {
+  const next = normalizeMetadata(metadata);
+  if (!escalation) {
+    if (Object.hasOwn(next, TASK_OWNERSHIP_ESCALATION_METADATA_KEY)) {
+      delete next[TASK_OWNERSHIP_ESCALATION_METADATA_KEY];
+    }
+    return next;
+  }
+  next[TASK_OWNERSHIP_ESCALATION_METADATA_KEY] = escalation;
+  return next;
+}
+
 function resolveTaskLedgerPaths(stateDir = resolveStateDir()) {
   const rootDir = path.join(stateDir, "shared", "task-ledger");
   return {
@@ -1040,6 +1138,7 @@ function createSnapshotFromRecords(params: {
   const materialized = materializeLedgerState(params.records);
   applyDerivedTaskActivationEvidence(materialized);
   applyDerivedTaskProofCheckpointEvidence(materialized);
+  applyDerivedTaskOwnershipEscalationEvidence(materialized);
   const recentLimit =
     typeof params.recentEventLimit === "number" && params.recentEventLimit > 0
       ? Math.floor(params.recentEventLimit)
@@ -1392,6 +1491,404 @@ function applyDerivedTaskProofCheckpointEvidence(materialized: MaterializedLedge
   }
 }
 
+function ownershipEscalationLevelRank(level: TaskOwnershipEscalationLevel): number {
+  switch (level) {
+    case "watch":
+      return 1;
+    case "escalated":
+      return 2;
+    case "reassignment_ready":
+      return 3;
+  }
+}
+
+function maxOwnershipEscalationLevel(
+  left: TaskOwnershipEscalationLevel,
+  right: TaskOwnershipEscalationLevel,
+): TaskOwnershipEscalationLevel {
+  return ownershipEscalationLevelRank(left) >= ownershipEscalationLevelRank(right) ? left : right;
+}
+
+function buildTaskOwnershipEscalationThresholds(): TaskOwnershipEscalationState["thresholds"] {
+  return {
+    activationMissesToEscalate: OWNERSHIP_ACTIVATION_MISSES_TO_ESCALATE,
+    activationMissesToReassign: OWNERSHIP_ACTIVATION_MISSES_TO_REASSIGN,
+    statusOnlyUpdatesToPrompt: PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES,
+    statusOnlyUpdatesToEscalate: OWNERSHIP_STATUS_ONLY_UPDATES_TO_ESCALATE,
+    statusOnlyUpdatesToReassign: OWNERSHIP_STATUS_ONLY_UPDATES_TO_REASSIGN,
+    staleHeartbeatMs: RECONCILE_AGENT_STALE_MS,
+  };
+}
+
+function isFreshAgentHeartbeat(heartbeatAtMs: number, reconciliationTsMs: number): boolean {
+  return (
+    Number.isFinite(heartbeatAtMs) &&
+    Number.isFinite(reconciliationTsMs) &&
+    reconciliationTsMs - heartbeatAtMs < RECONCILE_AGENT_STALE_MS
+  );
+}
+
+function findLatestTaskRecord(
+  records: TaskLedgerRecord[],
+  taskId: string,
+  predicate?: (record: TaskLedgerTaskRecord) => boolean,
+): TaskLedgerTaskRecord | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record?.entity !== "task" || record.taskId !== taskId || isReconcileTaskNote(record)) {
+      continue;
+    }
+    if (!predicate || predicate(record)) {
+      return record;
+    }
+  }
+  return undefined;
+}
+
+function buildTaskOwnershipObservationContext(
+  materialized: MaterializedLedgerState,
+): TaskOwnershipObservationContext {
+  const lastSubstantiveTaskRecordById = new Map<string, TaskLedgerTaskRecord>();
+  const lastAgentRecordById = new Map<string, TaskLedgerAgentRecord>();
+  const activationEvidenceByTaskId = new Map<string, TaskActivationEvidence>();
+  const proofCheckpointByTaskId = new Map<string, TaskProofCheckpointEvidence>();
+  const activeWorkByAgentId = new Map<string, ActiveTaskWork>();
+  const heartbeatClaimantsByTaskId = new Map<
+    string,
+    Array<{ agentId: string; status: AgentActivityStatus; heartbeatAt: string }>
+  >();
+  const reconciliationTs = materialized.appliedRecords.at(-1)?.ts ?? new Date().toISOString();
+  const reconciliationTsMs = Date.parse(reconciliationTs);
+
+  const considerActiveWork = (agentId: string, candidate: ActiveTaskWork) => {
+    if (!Number.isFinite(candidate.tsMs)) {
+      return;
+    }
+    const current = activeWorkByAgentId.get(agentId);
+    if (!current || candidate.tsMs > current.tsMs) {
+      activeWorkByAgentId.set(agentId, candidate);
+    }
+  };
+
+  for (const record of materialized.appliedRecords) {
+    if (record.entity === "task") {
+      if (!isReconcileTaskNote(record)) {
+        lastSubstantiveTaskRecordById.set(record.taskId, record);
+      }
+      continue;
+    }
+    if (record.entity === "agent") {
+      lastAgentRecordById.set(record.agentId, record);
+    }
+  }
+
+  for (const task of materialized.tasks.values()) {
+    const activationEvidence = deriveTaskActivationEvidence(task, materialized.appliedRecords);
+    if (activationEvidence) {
+      activationEvidenceByTaskId.set(task.id, activationEvidence);
+    }
+
+    const proofCheckpointEvidence = deriveTaskProofCheckpointEvidence(
+      task,
+      materialized.appliedRecords,
+    );
+    if (proofCheckpointEvidence) {
+      proofCheckpointByTaskId.set(task.id, proofCheckpointEvidence);
+    }
+
+    const assignedAgent = trimToUndefined(task.assignedAgent);
+    if (task.state !== "in_progress" || !assignedAgent) {
+      continue;
+    }
+    const taskRecord = lastSubstantiveTaskRecordById.get(task.id);
+    considerActiveWork(assignedAgent, {
+      taskId: task.id,
+      tsMs: taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt),
+      referenceId: taskRecord?.id ?? task.id,
+      source: "task",
+    });
+  }
+
+  for (const agent of materialized.agents.values()) {
+    const currentTaskId = trimToUndefined(agent.currentTaskId);
+    if (!currentTaskId) {
+      continue;
+    }
+    const task = materialized.tasks.get(currentTaskId);
+    const agentRecord = lastAgentRecordById.get(agent.id);
+    if (!task || !agentRecord) {
+      continue;
+    }
+
+    const heartbeatAtMs = Date.parse(agentRecord.ts);
+    const heartbeatIsFresh = isFreshAgentHeartbeat(heartbeatAtMs, reconciliationTsMs);
+
+    if (heartbeatIsFresh && agent.status !== "idle") {
+      considerActiveWork(agent.id, {
+        taskId: currentTaskId,
+        tsMs: heartbeatAtMs,
+        referenceId: agentRecord.id,
+        source: "heartbeat",
+      });
+
+      const existing = heartbeatClaimantsByTaskId.get(currentTaskId) ?? [];
+      if (!existing.some((entry) => entry.agentId === agent.id)) {
+        existing.push({
+          agentId: agent.id,
+          status: agent.status,
+          heartbeatAt: agent.heartbeatAt,
+        });
+        heartbeatClaimantsByTaskId.set(currentTaskId, existing);
+      }
+    }
+  }
+
+  return {
+    reconciliationTs,
+    reconciliationTsMs,
+    lastSubstantiveTaskRecordById,
+    lastAgentRecordById,
+    activationEvidenceByTaskId,
+    proofCheckpointByTaskId,
+    activeWorkByAgentId,
+    heartbeatClaimantsByTaskId,
+  };
+}
+
+function deriveTaskOwnershipEscalationState(
+  task: TaskLedgerTask,
+  materialized: MaterializedLedgerState,
+  context: TaskOwnershipObservationContext,
+): TaskOwnershipEscalationState | null {
+  const thresholds = buildTaskOwnershipEscalationThresholds();
+  const triggers: TaskOwnershipEscalationTrigger[] = [];
+  let level: TaskOwnershipEscalationLevel = "watch";
+  let takeover: TaskOwnershipEscalationState["takeover"];
+  const assignedAgent = trimToUndefined(task.assignedAgent);
+  const taskRecord = context.lastSubstantiveTaskRecordById.get(task.id);
+
+  const addTrigger = (trigger: TaskOwnershipEscalationTrigger) => {
+    triggers.push(trigger);
+    level = maxOwnershipEscalationLevel(level, trigger.level);
+  };
+
+  const activationEvidence = context.activationEvidenceByTaskId.get(task.id);
+  if (
+    assignedAgent &&
+    activationEvidence &&
+    task.state !== "blocked" &&
+    Number.isFinite(context.reconciliationTsMs)
+  ) {
+    const activation = activationEvidence.activation;
+    const missedCheckpoints: TaskActivationMissedCheckpoint[] = [];
+    if (
+      !activationEvidence.acknowledgedAt &&
+      Number.isFinite(Date.parse(activation.acknowledgeDeadlineAt)) &&
+      context.reconciliationTsMs >= Date.parse(activation.acknowledgeDeadlineAt)
+    ) {
+      missedCheckpoints.push("acknowledge");
+    }
+    if (
+      !activationEvidence.lanePinnedAt &&
+      !activationEvidence.startDisposition &&
+      Number.isFinite(Date.parse(activation.laneDeadlineAt)) &&
+      context.reconciliationTsMs >= Date.parse(activation.laneDeadlineAt)
+    ) {
+      missedCheckpoints.push("lane");
+    }
+    if (
+      !activationEvidence.startedAt &&
+      !activationEvidence.startDisposition &&
+      Number.isFinite(Date.parse(activation.startDeadlineAt)) &&
+      context.reconciliationTsMs >= Date.parse(activation.startDeadlineAt)
+    ) {
+      missedCheckpoints.push("start");
+    }
+
+    if (missedCheckpoints.length > 0) {
+      const missCount = missedCheckpoints.length;
+      addTrigger({
+        code: "activation_sla",
+        level:
+          missCount >= OWNERSHIP_ACTIVATION_MISSES_TO_REASSIGN
+            ? "reassignment_ready"
+            : missCount >= OWNERSHIP_ACTIVATION_MISSES_TO_ESCALATE
+              ? "escalated"
+              : "watch",
+        observedAt:
+          missedCheckpoints.at(-1) === "start"
+            ? activation.startDeadlineAt
+            : missedCheckpoints.at(-1) === "lane"
+              ? activation.laneDeadlineAt
+              : activation.acknowledgeDeadlineAt,
+        summary: `Missed ${missCount} of 3 activation checkpoints in the current assignment cycle.`,
+        activationMisses: {
+          checkpoints: missedCheckpoints,
+          missCount,
+        },
+      });
+    }
+  }
+
+  const proofCheckpointEvidence = context.proofCheckpointByTaskId.get(task.id);
+  if (
+    task.state === "in_progress" &&
+    proofCheckpointEvidence &&
+    proofCheckpointEvidence.statusOnlyUpdateCount >= PROOF_CHECKPOINT_REQUIRED_STATUS_NOTES
+  ) {
+    const statusOnlyUpdateCount = proofCheckpointEvidence.statusOnlyUpdateCount;
+    addTrigger({
+      code: "proof_checkpoint",
+      level:
+        statusOnlyUpdateCount >= OWNERSHIP_STATUS_ONLY_UPDATES_TO_REASSIGN
+          ? "reassignment_ready"
+          : statusOnlyUpdateCount >= OWNERSHIP_STATUS_ONLY_UPDATES_TO_ESCALATE
+            ? "escalated"
+            : "watch",
+      observedAt:
+        proofCheckpointEvidence.lastStatusNoteAt ??
+        proofCheckpointEvidence.prompt?.requestedAt ??
+        task.lastEventAt,
+      summary: `Observed ${statusOnlyUpdateCount} consecutive status-only in-progress updates since the last proof checkpoint.`,
+      proofCheckpoint: {
+        statusOnlyUpdateCount,
+        ...(proofCheckpointEvidence.prompt?.requestedAt
+          ? { promptRequestedAt: proofCheckpointEvidence.prompt.requestedAt }
+          : {}),
+      },
+    });
+  }
+
+  if (task.state === "in_progress" && assignedAgent) {
+    const agent = materialized.agents.get(assignedAgent);
+    const agentRecord = context.lastAgentRecordById.get(assignedAgent);
+    if (!agent || !agentRecord) {
+      addTrigger({
+        code: "assigned_agent_missing",
+        level: "escalated",
+        observedAt: taskRecord?.ts ?? task.lastEventAt,
+        summary: `Assigned agent ${assignedAgent} has no current heartbeat for this in-progress task.`,
+        ownership: { assignedAgent },
+      });
+    } else if (agent.status === "idle") {
+      addTrigger({
+        code: "assigned_agent_idle",
+        level: "escalated",
+        observedAt: agent.lastSeenAt,
+        summary: `Assigned agent ${assignedAgent} is idle while the task is still in progress.`,
+        ownership: { assignedAgent },
+      });
+    } else {
+      const staleDeltaMs = context.reconciliationTsMs - Date.parse(agent.lastSeenAt);
+      if (Number.isFinite(staleDeltaMs) && staleDeltaMs >= RECONCILE_AGENT_STALE_MS) {
+        addTrigger({
+          code: "assigned_agent_stale",
+          level: "escalated",
+          observedAt: agent.lastSeenAt,
+          summary: `Assigned agent ${assignedAgent} has a stale heartbeat for this in-progress task.`,
+          ownership: {
+            assignedAgent,
+            staleHeartbeatAt: agent.lastSeenAt,
+          },
+        });
+      }
+    }
+  }
+
+  const claimant = (context.heartbeatClaimantsByTaskId.get(task.id) ?? [])
+    .filter((entry) => entry.status !== "idle" && entry.agentId !== assignedAgent)
+    .toSorted((left, right) => Date.parse(right.heartbeatAt) - Date.parse(left.heartbeatAt))[0];
+  if (claimant) {
+    addTrigger({
+      code: "heartbeat_claim_mismatch",
+      level: "reassignment_ready",
+      observedAt: claimant.heartbeatAt,
+      summary: `Agent ${claimant.agentId} is actively heartbeating this task while ledger ownership points elsewhere.`,
+      ownership: {
+        ...(assignedAgent ? { assignedAgent } : {}),
+        claimedByAgent: claimant.agentId,
+      },
+    });
+    takeover = {
+      recommended: true,
+      through: "task_ledger",
+      path: "publish_task_assignment",
+      summary: assignedAgent
+        ? `If ${claimant.agentId} is the real owner, reassign the task in the ledger by updating assignedAgent from ${assignedAgent} to ${claimant.agentId}; otherwise clear ${claimant.agentId}'s heartbeat claim. Mission Control remains a control surface only.`
+        : `If ${claimant.agentId} is the real owner, assign the task to ${claimant.agentId} through the ledger; otherwise clear ${claimant.agentId}'s heartbeat claim. Mission Control remains a control surface only.`,
+      ...(assignedAgent ? { currentAssignedAgent: assignedAgent } : {}),
+      suggestedAgent: claimant.agentId,
+    };
+  }
+
+  if (task.state === "blocked" && assignedAgent) {
+    const blockedRecord = findLatestTaskRecord(
+      materialized.appliedRecords,
+      task.id,
+      (record) => record.kind !== "note",
+    );
+    const blockedTsMs = blockedRecord ? Date.parse(blockedRecord.ts) : Date.parse(task.lastEventAt);
+    const activeWork = context.activeWorkByAgentId.get(assignedAgent);
+    if (
+      activeWork &&
+      activeWork.taskId !== task.id &&
+      Number.isFinite(blockedTsMs) &&
+      activeWork.tsMs > blockedTsMs
+    ) {
+      addTrigger({
+        code: "blocked_superseded",
+        level: "reassignment_ready",
+        observedAt: new Date(activeWork.tsMs).toISOString(),
+        summary: `Blocked ownership is superseded by newer active work on ${activeWork.taskId}.`,
+        ownership: {
+          assignedAgent,
+          supersededByTaskId: activeWork.taskId,
+        },
+      });
+      takeover ??= {
+        recommended: true,
+        through: "task_ledger",
+        path: "publish_task_assignment",
+        summary: `If ${task.id} still needs work, reassign or clear its ownership through the ledger before anyone takes it over, then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
+        currentAssignedAgent: assignedAgent,
+      };
+    }
+  }
+
+  if (triggers.length === 0) {
+    return null;
+  }
+
+  if (level === "reassignment_ready" && !takeover) {
+    takeover = {
+      recommended: true,
+      through: "task_ledger",
+      path: "publish_task_assignment",
+      summary: assignedAgent
+        ? `Reassign the task through the ledger by updating assignedAgent (or clearing stale ownership), then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`
+        : `Assign the task through the ledger before anyone takes it over, then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
+      ...(assignedAgent ? { currentAssignedAgent: assignedAgent } : {}),
+    };
+  }
+
+  return {
+    version: 1,
+    sourceOfTruth: "task_ledger",
+    level,
+    thresholds,
+    triggers,
+    ...(takeover ? { takeover } : {}),
+  };
+}
+
+function applyDerivedTaskOwnershipEscalationEvidence(materialized: MaterializedLedgerState) {
+  const context = buildTaskOwnershipObservationContext(materialized);
+  for (const task of materialized.tasks.values()) {
+    const escalation = deriveTaskOwnershipEscalationState(task, materialized, context);
+    task.metadata = withTaskOwnershipEscalationMetadata(task.metadata, escalation ?? undefined);
+  }
+}
+
 function buildReconcileIdempotencyKey(kind: string, parts: Array<string | undefined>): string {
   return `${RECONCILE_IDEMPOTENCY_PREFIX}:${kind}:${parts
     .map((part) => trimToUndefined(part) ?? "none")
@@ -1426,31 +1923,9 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     return [];
   }
 
-  const lastSubstantiveTaskRecordById = new Map<string, TaskLedgerTaskRecord>();
-  const lastAgentRecordById = new Map<string, TaskLedgerAgentRecord>();
+  const context = buildTaskOwnershipObservationContext(materialized);
   const emittedIdempotencyKeys = new Set<string>();
-
-  for (const record of materialized.appliedRecords) {
-    if (record.entity === "task") {
-      if (!isReconcileTaskNote(record)) {
-        lastSubstantiveTaskRecordById.set(record.taskId, record);
-      }
-      continue;
-    }
-    if (record.entity === "agent") {
-      lastAgentRecordById.set(record.agentId, record);
-    }
-  }
-
   const notes: TaskLedgerTaskRecord[] = [];
-  const activationEvidenceByTaskId = new Map<string, TaskActivationEvidence>();
-  const proofCheckpointByTaskId = new Map<string, TaskProofCheckpointEvidence>();
-  const activeWorkByAgentId = new Map<
-    string,
-    { taskId: string; tsMs: number; referenceId: string; source: "task" | "heartbeat" }
-  >();
-  const reconciliationTs = materialized.appliedRecords.at(-1)?.ts ?? new Date().toISOString();
-  const reconciliationTsMs = Date.parse(reconciliationTs);
 
   const queueTaskNote = (taskId: string, summary: string, idempotencyKey: string, ts?: string) => {
     if (!materialized.tasks.has(taskId) || emittedIdempotencyKeys.has(idempotencyKey)) {
@@ -1467,61 +1942,19 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     );
   };
 
-  const considerActiveWork = (
-    agentId: string,
-    candidate: {
-      taskId: string;
-      tsMs: number;
-      referenceId: string;
-      source: "task" | "heartbeat";
-    },
-  ) => {
-    if (!Number.isFinite(candidate.tsMs)) {
-      return;
-    }
-    const current = activeWorkByAgentId.get(agentId);
-    if (!current || candidate.tsMs > current.tsMs) {
-      activeWorkByAgentId.set(agentId, candidate);
-    }
-  };
-
-  for (const task of materialized.tasks.values()) {
-    const activationEvidence = deriveTaskActivationEvidence(task, materialized.appliedRecords);
-    if (activationEvidence) {
-      activationEvidenceByTaskId.set(task.id, activationEvidence);
-    }
-    const proofCheckpointEvidence = deriveTaskProofCheckpointEvidence(
-      task,
-      materialized.appliedRecords,
-    );
-    if (proofCheckpointEvidence) {
-      proofCheckpointByTaskId.set(task.id, proofCheckpointEvidence);
-    }
-  }
-
   for (const task of materialized.tasks.values()) {
     const assignedAgent = trimToUndefined(task.assignedAgent);
-    const taskRecord = lastSubstantiveTaskRecordById.get(task.id);
-    const taskRecordId = taskRecord?.id;
-    const taskTsMs = taskRecord ? Date.parse(taskRecord.ts) : Date.parse(task.lastEventAt);
-    const activationEvidence = activationEvidenceByTaskId.get(task.id);
-    const proofCheckpointEvidence = proofCheckpointByTaskId.get(task.id);
+    const activationEvidence = context.activationEvidenceByTaskId.get(task.id);
+    const proofCheckpointEvidence = context.proofCheckpointByTaskId.get(task.id);
 
     if (task.state === "in_progress" && assignedAgent) {
-      considerActiveWork(assignedAgent, {
-        taskId: task.id,
-        tsMs: taskTsMs,
-        referenceId: taskRecordId ?? task.id,
-        source: "task",
-      });
-
       const agent = materialized.agents.get(assignedAgent);
-      const agentRecord = lastAgentRecordById.get(assignedAgent);
+      const agentRecord = context.lastAgentRecordById.get(assignedAgent);
 
       if (!agent || !agentRecord) {
         queueTaskNote(
           task.id,
-          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but no agent heartbeat is recorded. This usually means stale residue from earlier work; verify whether the task should remain in progress or be reassigned.`,
+          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but no agent heartbeat is recorded. This is immediate ownership escalation. If ${assignedAgent} is no longer the owner, reassign through the ledger by updating assignedAgent (or clearing it), then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
           buildReconcileIdempotencyKey("in-progress-agent-missing", [
             task.id,
             assignedAgent,
@@ -1534,7 +1967,7 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       if (agent.status === "idle") {
         queueTaskNote(
           task.id,
-          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but the latest heartbeat reports the agent idle. This usually means the task state or agent context was not cleaned up; verify whether the task should pause or the agent context should be updated.`,
+          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but the latest heartbeat reports the agent idle. This is immediate ownership escalation. If ${assignedAgent} does not resume through the ledger, reassign by updating assignedAgent (or clearing stale ownership), then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
           buildReconcileIdempotencyKey("in-progress-agent-idle", [
             task.id,
             assignedAgent,
@@ -1544,21 +1977,18 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
         continue;
       }
 
-      const taskReferenceTsMs = taskRecord
-        ? Date.parse(taskRecord.ts)
-        : Date.parse(task.lastEventAt);
-      const staleDeltaMs = taskReferenceTsMs - Date.parse(agent.lastSeenAt);
+      const staleDeltaMs = context.reconciliationTsMs - Date.parse(agent.lastSeenAt);
       if (Number.isFinite(staleDeltaMs) && staleDeltaMs >= RECONCILE_AGENT_STALE_MS) {
         queueTaskNote(
           task.id,
-          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but the latest heartbeat is stale (${agent.lastSeenAt}). This looks like stale residue unless work is still active; verify whether the task should remain in progress or refresh the agent task context.`,
+          `Reconcile residue: task is still marked in progress for assigned agent ${assignedAgent}, but the latest heartbeat is stale (${agent.lastSeenAt}). This is immediate ownership escalation. If ${assignedAgent} does not refresh task ownership through the ledger, reassign by updating assignedAgent (or clearing stale ownership), then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
           buildReconcileIdempotencyKey("in-progress-agent-stale", [
             task.id,
             assignedAgent,
             "stale",
           ]),
-          Number.isFinite(taskReferenceTsMs)
-            ? new Date(taskReferenceTsMs).toISOString()
+          Number.isFinite(context.reconciliationTsMs)
+            ? new Date(context.reconciliationTsMs).toISOString()
             : undefined,
         );
       }
@@ -1567,7 +1997,7 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     if (
       assignedAgent &&
       activationEvidence &&
-      Number.isFinite(reconciliationTsMs) &&
+      Number.isFinite(context.reconciliationTsMs) &&
       task.state !== "blocked"
     ) {
       const activation = activationEvidence.activation;
@@ -1576,11 +2006,11 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       if (
         !activationEvidence.acknowledgedAt &&
         Number.isFinite(acknowledgeDeadlineMs) &&
-        reconciliationTsMs >= acknowledgeDeadlineMs
+        context.reconciliationTsMs >= acknowledgeDeadlineMs
       ) {
         queueTaskNote(
           task.id,
-          `Activation SLA miss: assigned agent ${assignedAgent} has not acknowledged the task in the ledger within ${Math.floor(activation.acknowledgeWithinMs / 60_000)} minutes. Expected explicit task context, blocked state, or deferred progress before ${activation.acknowledgeDeadlineAt}.`,
+          `Activation SLA miss: assigned agent ${assignedAgent} has not acknowledged the task in the ledger within ${Math.floor(activation.acknowledgeWithinMs / 60_000)} minutes. Expected explicit task context, blocked state, or deferred progress before ${activation.acknowledgeDeadlineAt}. This is 1 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership after 2 missed checkpoints; reassign through the ledger after 3 if the task is still silent.`,
           buildReconcileIdempotencyKey("activation-ack-missed", [
             activationCycleId,
             activation.acknowledgeDeadlineAt,
@@ -1593,12 +2023,12 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       if (
         !activationEvidence.lanePinnedAt &&
         Number.isFinite(laneDeadlineMs) &&
-        reconciliationTsMs >= laneDeadlineMs &&
+        context.reconciliationTsMs >= laneDeadlineMs &&
         !activationEvidence.startDisposition
       ) {
         queueTaskNote(
           task.id,
-          `Activation SLA miss: assigned agent ${assignedAgent} has not pinned a lane for this task within ${Math.floor(activation.laneWithinMs / 60_000)} minutes. Expected a heartbeat with lane context before ${activation.laneDeadlineAt}.`,
+          `Activation SLA miss: assigned agent ${assignedAgent} has not pinned a lane for this task within ${Math.floor(activation.laneWithinMs / 60_000)} minutes. Expected a heartbeat with lane context before ${activation.laneDeadlineAt}. This is 2 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership now. If the final start checkpoint is also missed, reassign through the ledger by updating assignedAgent and requiring the gaining owner to heartbeat currentTaskId ${task.id}.`,
           buildReconcileIdempotencyKey("activation-lane-missed", [
             activationCycleId,
             activation.laneDeadlineAt,
@@ -1612,11 +2042,11 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
         !activationEvidence.startedAt &&
         !activationEvidence.startDisposition &&
         Number.isFinite(startDeadlineMs) &&
-        reconciliationTsMs >= startDeadlineMs
+        context.reconciliationTsMs >= startDeadlineMs
       ) {
         queueTaskNote(
           task.id,
-          `Activation SLA miss: assigned agent ${assignedAgent} did not show explicit start proof within ${Math.floor(activation.startWithinMs / 60_000)} minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before ${activation.startDeadlineAt}.`,
+          `Activation SLA miss: assigned agent ${assignedAgent} did not show explicit start proof within ${Math.floor(activation.startWithinMs / 60_000)} minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before ${activation.startDeadlineAt}. This is 3 of 3 missed activation checkpoints for the current assignment cycle. Reassignment is now appropriate: update assignedAgent through the ledger (or clear stale ownership), then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
           buildReconcileIdempotencyKey("activation-start-missed", [
             activationCycleId,
             activation.startDeadlineAt,
@@ -1634,8 +2064,42 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     ) {
       queueTaskNote(
         task.id,
-        `Proof checkpoint required: task is still in progress, but the latest ${proofCheckpointEvidence.statusOnlyUpdateCount} agent updates are status-only with no concrete proof of work. Record a proof checkpoint with files touched, diff summary, tests run, or review signal before sending another status-only update.`,
+        `Proof checkpoint required: task is still in progress, but the latest ${proofCheckpointEvidence.statusOnlyUpdateCount} agent updates are status-only with no concrete proof of work. Record a proof checkpoint with files touched, diff summary, tests run, or review signal before sending another status-only update. Escalate ownership at ${OWNERSHIP_STATUS_ONLY_UPDATES_TO_ESCALATE} consecutive status-only updates and reassign through the ledger at ${OWNERSHIP_STATUS_ONLY_UPDATES_TO_REASSIGN} if no proof is recorded.`,
         buildReconcileIdempotencyKey("proof-checkpoint-required", [
+          task.id,
+          trimToUndefined(task.assignedAgent) ?? "unassigned",
+          proofCheckpointEvidence.lastCheckpointAt ?? proofCheckpointEvidence.currentCycleStartedAt,
+        ]),
+        proofCheckpointEvidence.lastStatusNoteAt,
+      );
+    }
+
+    if (
+      task.state === "in_progress" &&
+      proofCheckpointEvidence &&
+      proofCheckpointEvidence.statusOnlyUpdateCount >= OWNERSHIP_STATUS_ONLY_UPDATES_TO_ESCALATE
+    ) {
+      queueTaskNote(
+        task.id,
+        `Ownership escalation: task is still in progress with ${proofCheckpointEvidence.statusOnlyUpdateCount} consecutive status-only updates and no proof checkpoint. Escalate the current owner now. If one more status-only update lands without proof, reassign through the ledger by updating assignedAgent and requiring the gaining owner to heartbeat currentTaskId ${task.id}.`,
+        buildReconcileIdempotencyKey("proof-checkpoint-escalated", [
+          task.id,
+          trimToUndefined(task.assignedAgent) ?? "unassigned",
+          proofCheckpointEvidence.lastCheckpointAt ?? proofCheckpointEvidence.currentCycleStartedAt,
+        ]),
+        proofCheckpointEvidence.lastStatusNoteAt,
+      );
+    }
+
+    if (
+      task.state === "in_progress" &&
+      proofCheckpointEvidence &&
+      proofCheckpointEvidence.statusOnlyUpdateCount >= OWNERSHIP_STATUS_ONLY_UPDATES_TO_REASSIGN
+    ) {
+      queueTaskNote(
+        task.id,
+        `Ownership reassignment ready: task is still in progress with ${proofCheckpointEvidence.statusOnlyUpdateCount} consecutive status-only updates and no proof checkpoint. Reassign through the ledger by updating assignedAgent (or clearing stale ownership), then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
+        buildReconcileIdempotencyKey("proof-checkpoint-reassign", [
           task.id,
           trimToUndefined(task.assignedAgent) ?? "unassigned",
           proofCheckpointEvidence.lastCheckpointAt ?? proofCheckpointEvidence.currentCycleStartedAt,
@@ -1651,17 +2115,15 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       continue;
     }
     const task = materialized.tasks.get(currentTaskId);
-    const agentRecord = lastAgentRecordById.get(agent.id);
+    const agentRecord = context.lastAgentRecordById.get(agent.id);
     if (!task || !agentRecord) {
       continue;
     }
 
-    considerActiveWork(agent.id, {
-      taskId: currentTaskId,
-      tsMs: Date.parse(agentRecord.ts),
-      referenceId: agentRecord.id,
-      source: "heartbeat",
-    });
+    const heartbeatAtMs = Date.parse(agentRecord.ts);
+    if (!isFreshAgentHeartbeat(heartbeatAtMs, context.reconciliationTsMs)) {
+      continue;
+    }
 
     const assignedAgent = trimToUndefined(task.assignedAgent);
 
@@ -1682,8 +2144,8 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
       queueTaskNote(
         task.id,
         assignedAgent
-          ? `Reconcile mismatch: agent ${agent.id} heartbeat claims this task as current work, but the task is assigned to ${assignedAgent}. Fix task ownership or clear the stale heartbeat context.`
-          : `Reconcile mismatch: agent ${agent.id} heartbeat claims this task as current work, but the task is currently unassigned. Fix task ownership or clear the stale heartbeat context.`,
+          ? `Reconcile mismatch: agent ${agent.id} heartbeat claims this task as current work, but the task is assigned to ${assignedAgent}. If ${agent.id} is the real owner, reassign through the ledger by updating assignedAgent from ${assignedAgent} to ${agent.id}; otherwise clear ${agent.id}'s heartbeat claim. Mission Control remains a control surface only.`
+          : `Reconcile mismatch: agent ${agent.id} heartbeat claims this task as current work, but the task is currently unassigned. If ${agent.id} is the real owner, assign it through the ledger before takeover; otherwise clear ${agent.id}'s heartbeat claim. Mission Control remains a control surface only.`,
         buildReconcileIdempotencyKey("heartbeat-task-assignment-mismatch", [
           task.id,
           agent.id,
@@ -1699,9 +2161,13 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     if (task.state !== "blocked" || !assignedAgent) {
       continue;
     }
-    const blockedRecord = lastSubstantiveTaskRecordById.get(task.id);
+    const blockedRecord = findLatestTaskRecord(
+      materialized.appliedRecords,
+      task.id,
+      (record) => record.kind !== "note",
+    );
     const blockedTsMs = blockedRecord ? Date.parse(blockedRecord.ts) : Date.parse(task.lastEventAt);
-    const activeWork = activeWorkByAgentId.get(assignedAgent);
+    const activeWork = context.activeWorkByAgentId.get(assignedAgent);
     if (!activeWork || activeWork.taskId === task.id || !Number.isFinite(blockedTsMs)) {
       continue;
     }
@@ -1710,7 +2176,7 @@ function buildReconciliationRecords(materialized: MaterializedLedgerState): Task
     }
     queueTaskNote(
       task.id,
-      `Reconcile residue: blocked task still belongs to ${assignedAgent}, but newer active work exists on ${activeWork.taskId}. Review whether this task is still blocked, should be reassigned, or can be reopened.`,
+      `Reconcile residue: blocked task still belongs to ${assignedAgent}, but newer active work exists on ${activeWork.taskId}. Reassignment is appropriate if ${task.id} still needs work: publish the ownership change through the ledger before takeover, then require the gaining owner to heartbeat currentTaskId ${task.id}. Mission Control remains a control surface only.`,
       buildReconcileIdempotencyKey("blocked-task-superseded", [
         task.id,
         assignedAgent,

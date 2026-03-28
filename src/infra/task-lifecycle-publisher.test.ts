@@ -203,7 +203,7 @@ describe("task lifecycle publisher", () => {
 
     expect(reconcileNotes).toHaveLength(1);
     expect(reconcileNotes.map((event) => event.summary)).toEqual([
-      "Reconcile residue: task is still marked in progress for assigned agent forge, but no agent heartbeat is recorded. This usually means stale residue from earlier work; verify whether the task should remain in progress or be reassigned.",
+      "Reconcile residue: task is still marked in progress for assigned agent forge, but no agent heartbeat is recorded. This is immediate ownership escalation. If forge is no longer the owner, reassign through the ledger by updating assignedAgent (or clearing it), then require the gaining owner to heartbeat currentTaskId task-1. Mission Control remains a control surface only.",
     ]);
 
     expect(events.map((event) => event.idempotencyKey)).toEqual([

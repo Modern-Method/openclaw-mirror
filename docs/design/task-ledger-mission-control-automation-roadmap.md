@@ -132,6 +132,13 @@ Create a reconciliation layer that can:
 - suggest safe fixes
 - optionally apply deterministic safe reconciliations
 
+Escalation and reassignment rules should stay ledger-native:
+
+- activation misses should have explicit thresholds, not vague "follow up later" residue
+- repeated proof-checkpoint misses / status loops should escalate on a fixed threshold and become reassignment-eligible on a later threshold
+- stale or superseded ownership should define a ledger takeover path: publish the ownership change in the task ledger first, then let the gaining owner heartbeat the task
+- Mission Control actions should remain a control surface over those ledger writes, never a second truth store
+
 ### Important rule
 
 Do not hide this inside silent UI reads.

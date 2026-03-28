@@ -7,6 +7,7 @@ import {
   TASK_ACTIVATION_LANE_DEADLINE_MS,
   TASK_ACTIVATION_START_DEADLINE_MS,
   TASK_LEDGER_SCHEMA,
+  TASK_OWNERSHIP_ESCALATION_METADATA_KEY,
   TASK_PROOF_CHECKPOINT_METADATA_KEY,
   publishTaskLedgerEvents,
   readTaskLedgerEvents,
@@ -781,10 +782,76 @@ describe("task ledger", () => {
       .filter((summary) => summary.startsWith("Activation SLA miss:"));
 
     expect(activationNotes).toEqual([
-      "Activation SLA miss: assigned agent forge has not acknowledged the task in the ledger within 5 minutes. Expected explicit task context, blocked state, or deferred progress before 2026-03-15T09:05:00.000Z.",
-      "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T09:10:00.000Z.",
-      "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T09:15:00.000Z.",
+      "Activation SLA miss: assigned agent forge has not acknowledged the task in the ledger within 5 minutes. Expected explicit task context, blocked state, or deferred progress before 2026-03-15T09:05:00.000Z. This is 1 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership after 2 missed checkpoints; reassign through the ledger after 3 if the task is still silent.",
+      "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T09:10:00.000Z. This is 2 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership now. If the final start checkpoint is also missed, reassign through the ledger by updating assignedAgent and requiring the gaining owner to heartbeat currentTaskId task-activation-2.",
+      "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T09:15:00.000Z. This is 3 of 3 missed activation checkpoints for the current assignment cycle. Reassignment is now appropriate: update assignedAgent through the ledger (or clear stale ownership), then require the gaining owner to heartbeat currentTaskId task-activation-2. Mission Control remains a control surface only.",
     ]);
+  });
+
+  it("projects structured ownership escalation metadata when activation misses exhaust an assignment cycle", async () => {
+    const stateDir = await createStateDir();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-activation-escalation-1",
+            title: "Silent assigned work",
+            state: "todo",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T09:00:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-activation-escalation-1",
+          summary: "Operator checked escalation state.",
+          actor: { type: "operator", id: "mission-control" },
+          ts: "2026-03-15T09:20:00.000Z",
+        },
+      ],
+    });
+
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const escalation = snapshot.tasks[0]?.metadata[TASK_OWNERSHIP_ESCALATION_METADATA_KEY] as
+      | Record<string, unknown>
+      | undefined;
+
+    expect(escalation).toMatchObject({
+      version: 1,
+      sourceOfTruth: "task_ledger",
+      level: "reassignment_ready",
+      thresholds: {
+        activationMissesToEscalate: 2,
+        activationMissesToReassign: 3,
+        statusOnlyUpdatesToPrompt: 2,
+        statusOnlyUpdatesToEscalate: 3,
+        statusOnlyUpdatesToReassign: 4,
+      },
+      triggers: [
+        {
+          code: "activation_sla",
+          level: "reassignment_ready",
+          activationMisses: {
+            checkpoints: ["acknowledge", "lane", "start"],
+            missCount: 3,
+          },
+        },
+      ],
+      takeover: {
+        recommended: true,
+        through: "task_ledger",
+        path: "publish_task_assignment",
+        currentAssignedAgent: "forge",
+      },
+    });
+    expect(escalation?.takeover).toMatchObject({
+      summary: expect.stringContaining("updating assignedAgent"),
+    });
   });
 
   it("treats deferred milestone evidence differently from silent missed-start work", async () => {
@@ -912,9 +979,9 @@ describe("task ledger", () => {
     expect(activation.startedAt).toBeUndefined();
     expect(activation.startDisposition).toBeUndefined();
     expect(activationNotes).toEqual([
-      "Activation SLA miss: assigned agent forge has not acknowledged the task in the ledger within 5 minutes. Expected explicit task context, blocked state, or deferred progress before 2026-03-15T11:05:00.000Z.",
-      "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T11:10:00.000Z.",
-      "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T11:15:00.000Z.",
+      "Activation SLA miss: assigned agent forge has not acknowledged the task in the ledger within 5 minutes. Expected explicit task context, blocked state, or deferred progress before 2026-03-15T11:05:00.000Z. This is 1 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership after 2 missed checkpoints; reassign through the ledger after 3 if the task is still silent.",
+      "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T11:10:00.000Z. This is 2 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership now. If the final start checkpoint is also missed, reassign through the ledger by updating assignedAgent and requiring the gaining owner to heartbeat currentTaskId task-activation-4.",
+      "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T11:15:00.000Z. This is 3 of 3 missed activation checkpoints for the current assignment cycle. Reassignment is now appropriate: update assignedAgent through the ledger (or clear stale ownership), then require the gaining owner to heartbeat currentTaskId task-activation-4. Mission Control remains a control surface only.",
     ]);
   });
 
@@ -931,8 +998,8 @@ describe("task ledger", () => {
         acknowledgedAt: "2026-03-15T12:03:00.000Z",
       },
       expectedMisses: [
-        "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T12:10:00.000Z.",
-        "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T12:15:00.000Z.",
+        "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T12:10:00.000Z. This is 2 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership now. If the final start checkpoint is also missed, reassign through the ledger by updating assignedAgent and requiring the gaining owner to heartbeat currentTaskId task-activation-5.",
+        "Activation SLA miss: assigned agent forge did not show explicit start proof within 15 minutes. Expected a run-start milestone, in-progress transition, or explicit blocked/deferred state before 2026-03-15T12:15:00.000Z. This is 3 of 3 missed activation checkpoints for the current assignment cycle. Reassignment is now appropriate: update assignedAgent through the ledger (or clear stale ownership), then require the gaining owner to heartbeat currentTaskId task-activation-5. Mission Control remains a control surface only.",
       ],
     },
     {
@@ -948,7 +1015,7 @@ describe("task ledger", () => {
         startedAt: "2026-03-15T13:04:00.000Z",
       },
       expectedMisses: [
-        "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T13:10:00.000Z.",
+        "Activation SLA miss: assigned agent forge has not pinned a lane for this task within 10 minutes. Expected a heartbeat with lane context before 2026-03-15T13:10:00.000Z. This is 2 of 3 missed activation checkpoints for the current assignment cycle. Escalate ownership now. If the final start checkpoint is also missed, reassign through the ledger by updating assignedAgent and requiring the gaining owner to heartbeat currentTaskId task-activation-6.",
       ],
     },
     {
@@ -1171,6 +1238,7 @@ describe("task ledger", () => {
     );
 
     expect(reconcilePrompts).toHaveLength(1);
+    expect(reconcilePrompts[0]?.summary).toContain("Escalate ownership at 3 consecutive");
     expect(promptState).toMatchObject({
       version: 1,
       statusOnlyUpdateCount: 2,
@@ -1183,6 +1251,84 @@ describe("task ledger", () => {
       },
     });
     expect(promptState?.lastCheckpointAt).toBeUndefined();
+
+    await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-proof-2",
+          summary: "Still working and do not have proof to share yet.",
+          actor: { type: "agent", id: "forge" },
+          ts: "2026-03-15T17:09:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-proof-2",
+          summary: "Continuing without a concrete proof update yet.",
+          actor: { type: "agent", id: "forge" },
+          ts: "2026-03-15T17:10:00.000Z",
+        },
+      ],
+    });
+
+    const escalatedSnapshot = await readTaskLedgerSnapshot({ stateDir });
+    const escalatedProofState = escalatedSnapshot.tasks[0]?.metadata[
+      TASK_PROOF_CHECKPOINT_METADATA_KEY
+    ] as Record<string, unknown> | undefined;
+    const escalatedOwnershipState = escalatedSnapshot.tasks[0]?.metadata[
+      TASK_OWNERSHIP_ESCALATION_METADATA_KEY
+    ] as Record<string, unknown> | undefined;
+    const escalatedEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-proof-2" });
+    const ownershipEscalationNote = escalatedEvents.find(
+      (event) =>
+        event.entity === "task" &&
+        event.kind === "note" &&
+        event.summary.startsWith("Ownership escalation:"),
+    );
+    const ownershipReassignNote = escalatedEvents.find(
+      (event) =>
+        event.entity === "task" &&
+        event.kind === "note" &&
+        event.summary.startsWith("Ownership reassignment ready:"),
+    );
+
+    expect(ownershipEscalationNote?.summary).toContain("4 consecutive status-only updates");
+    expect(ownershipReassignNote?.summary).toContain(
+      "Reassign through the ledger by updating assignedAgent",
+    );
+    expect(escalatedProofState).toMatchObject({
+      version: 1,
+      statusOnlyUpdateCount: 4,
+      lastStatusNoteAt: "2026-03-15T17:10:00.000Z",
+      prompt: {
+        required: true,
+        reason: "status_loop",
+        requestedAt: "2026-03-15T17:07:00.000Z",
+      },
+    });
+    expect(escalatedOwnershipState).toMatchObject({
+      version: 1,
+      sourceOfTruth: "task_ledger",
+      level: "reassignment_ready",
+      takeover: expect.objectContaining({
+        recommended: true,
+        path: "publish_task_assignment",
+      }),
+    });
+    expect(
+      (escalatedOwnershipState?.triggers as Array<Record<string, unknown>> | undefined)?.some(
+        (trigger) =>
+          trigger.code === "proof_checkpoint" &&
+          trigger.level === "reassignment_ready" &&
+          (trigger.proofCheckpoint as Record<string, unknown> | undefined)
+            ?.statusOnlyUpdateCount === 4 &&
+          (trigger.proofCheckpoint as Record<string, unknown> | undefined)?.promptRequestedAt ===
+            "2026-03-15T17:07:00.000Z",
+      ),
+    ).toBe(true);
 
     await publishTaskLedgerEvents({
       stateDir,
@@ -1207,6 +1353,9 @@ describe("task ledger", () => {
     const clearedState = clearedSnapshot.tasks[0]?.metadata[TASK_PROOF_CHECKPOINT_METADATA_KEY] as
       | Record<string, unknown>
       | undefined;
+    const clearedOwnershipState = clearedSnapshot.tasks[0]?.metadata[
+      TASK_OWNERSHIP_ESCALATION_METADATA_KEY
+    ] as Record<string, unknown> | undefined;
 
     expect(clearedState).toMatchObject({
       version: 1,
@@ -1219,6 +1368,16 @@ describe("task ledger", () => {
       statusOnlyUpdateCount: 0,
     });
     expect(clearedState?.prompt).toBeUndefined();
+    expect(clearedOwnershipState).toMatchObject({
+      version: 1,
+      sourceOfTruth: "task_ledger",
+      level: "watch",
+    });
+    expect(
+      (clearedOwnershipState?.triggers as Array<Record<string, unknown>> | undefined)?.every(
+        (trigger) => trigger.code !== "proof_checkpoint",
+      ),
+    ).toBe(true);
   });
 
   it("emits reconcile evidence when an active agent points at a task that is still todo", async () => {
@@ -1300,6 +1459,7 @@ describe("task ledger", () => {
     expect(result.accepted).toBe(3);
     expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/latest heartbeat reports the agent idle/i);
+    expect(taskEvents.at(-1)?.summary).toContain("immediate ownership escalation");
   });
 
   it("does not repeat reconcile residue for unchanged idle drift", async () => {
@@ -1402,6 +1562,53 @@ describe("task ledger", () => {
     expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/latest heartbeat is stale/i);
     expect(taskEvents.at(-1)?.summary).toContain("2026-03-15T06:20:00.000Z");
+    expect(taskEvents.at(-1)?.summary).toContain("currentTaskId task-1");
+  });
+
+  it("detects stale in-progress ownership against reconciliation time, not only task-local timestamps", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-1",
+            title: "Resume task",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T06:05:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-1",
+            summary: "Earlier run",
+          },
+          ts: "2026-03-15T06:10:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-2", title: "Unrelated work", state: "todo" },
+          ts: "2026-03-15T06:30:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    const staleEvent = taskEvents.find((event) => /latest heartbeat is stale/i.test(event.summary));
+
+    expect(result.accepted).toBeGreaterThanOrEqual(4);
+    expect(staleEvent?.summary).toMatch(/^Reconcile residue:/);
+    expect(staleEvent?.summary).toContain("2026-03-15T06:10:00.000Z");
   });
 
   it("emits reconcile evidence when older blocked work coexists with newer active work for the same agent", async () => {
@@ -1448,6 +1655,62 @@ describe("task ledger", () => {
     expect(result.accepted).toBe(4);
     expect(blockedTaskEvents.at(-1)?.summary).toMatch(/^Reconcile residue:/);
     expect(blockedTaskEvents.at(-1)?.summary).toMatch(/newer active work exists on task-2/i);
+    expect(blockedTaskEvents.at(-1)?.summary).toContain("Reassignment is appropriate");
+  });
+
+  it("does not let later blocked-task notes suppress superseded-ownership detection", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Blocked work", state: "blocked", assignedAgent: "forge" },
+          ts: "2026-03-15T06:50:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "upsert",
+          task: {
+            id: "task-2",
+            title: "Active work",
+            state: "in_progress",
+            assignedAgent: "forge",
+          },
+          ts: "2026-03-15T07:00:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-2",
+            summary: "Working task-2",
+          },
+          ts: "2026-03-15T07:10:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-1",
+          summary: "Operator left a later comment on the blocked task.",
+          actor: { type: "operator", id: "mission-control" },
+          ts: "2026-03-15T07:15:00.000Z",
+        },
+      ],
+    });
+
+    const blockedTaskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+
+    const supersededEvent = blockedTaskEvents.find((event) =>
+      /newer active work exists on task-2/i.test(event.summary),
+    );
+
+    expect(result.accepted).toBeGreaterThanOrEqual(5);
+    expect(supersededEvent?.summary).toMatch(/^Reconcile residue:/);
   });
 
   it("emits reconcile mismatch when heartbeat task context disagrees with task ownership", async () => {
@@ -1483,6 +1746,62 @@ describe("task ledger", () => {
     expect(result.accepted).toBe(3);
     expect(taskEvents.at(-1)?.summary).toMatch(/^Reconcile mismatch:/);
     expect(taskEvents.at(-1)?.summary).toMatch(/task is assigned to atlas/i);
+    expect(taskEvents.at(-1)?.summary).toContain("reassign through the ledger");
+  });
+
+  it("ignores stale heartbeat claims when deriving mismatch escalation state", async () => {
+    const stateDir = await createStateDir();
+
+    const result = await publishTaskLedgerEvents({
+      stateDir,
+      events: [
+        {
+          entity: "task",
+          kind: "upsert",
+          task: { id: "task-1", title: "Already closed", state: "done", assignedAgent: "atlas" },
+          ts: "2026-03-15T07:10:00.000Z",
+        },
+        {
+          entity: "agent",
+          kind: "heartbeat",
+          agent: {
+            id: "forge",
+            status: "running",
+            currentTaskId: "task-1",
+            summary: "Old task claim",
+          },
+          ts: "2026-03-15T07:11:00.000Z",
+        },
+        {
+          entity: "task",
+          kind: "note",
+          taskId: "task-1",
+          summary: "Operator checked ownership much later.",
+          actor: { type: "operator", id: "mission-control" },
+          ts: "2026-03-15T07:40:00.000Z",
+        },
+      ],
+    });
+
+    const taskEvents = await readTaskLedgerEvents({ stateDir, taskId: "task-1" });
+    const snapshot = await readTaskLedgerSnapshot({ stateDir });
+    const ownershipEscalation = snapshot.tasks[0]?.metadata[
+      TASK_OWNERSHIP_ESCALATION_METADATA_KEY
+    ] as Record<string, unknown> | undefined;
+    const reconcileMismatchEvents = taskEvents.filter(
+      (event) =>
+        event.entity === "task" &&
+        event.kind === "note" &&
+        event.summary.startsWith("Reconcile mismatch:"),
+    );
+
+    expect(result.accepted).toBe(3);
+    expect(reconcileMismatchEvents).toHaveLength(0);
+    expect(
+      (ownershipEscalation?.triggers as Array<Record<string, unknown>> | undefined)?.some(
+        (trigger) => trigger.code === "heartbeat_claim_mismatch",
+      ) ?? false,
+    ).toBe(false);
   });
 
   it("accepts recall trace events without mutating task/agent projections", async () => {
