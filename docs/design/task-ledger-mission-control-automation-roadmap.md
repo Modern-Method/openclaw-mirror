@@ -5,6 +5,7 @@
 Turn the task-ledger/task-bus stack into a more automatic, trustworthy operational spine for OpenClaw, while documenting the portable pieces we want to carry into Mercury.
 
 This roadmap is based on real operator pain observed during Story 4 / Story 5 work:
+
 - task truth lagging behind agent reality
 - Mission Control accurately reflecting stale ledger state
 - old blocked tasks dominating current agent status
@@ -16,6 +17,7 @@ This roadmap is based on real operator pain observed during Story 4 / Story 5 wo
 Make the **ledger more authoritative** and Mission Control more of a **live projection** over that authority.
 
 That means:
+
 - agents should publish lifecycle changes more automatically
 - heartbeats should carry stronger current-task context
 - Mission Control should project the ledger honestly, with freshness/confidence cues
@@ -27,6 +29,7 @@ Today the biggest issue is not that Mission Control is "just wrong."
 The bigger issue is that the upstream task-ledger/task-bus flow is only partially automated.
 
 That creates a recurring failure mode:
+
 1. agent starts real work
 2. task state stays `todo` or old blocked work remains attached
 3. Mission Control projects the ledger faithfully
@@ -41,10 +44,13 @@ So the roadmap focus should be upstream automation first, then projection qualit
 ## P0.1 Automatic task lifecycle publishing from agent execution
 
 ### Goal
+
 Stop depending on humans to manually reconcile the most common task transitions.
 
 ### Required behavior
+
 When an agent enters a real scoped implementation lane, the runtime should be able to publish:
+
 - `todo -> in_progress`
 - `in_progress -> blocked` with reason
 - `in_progress -> qa`
@@ -52,7 +58,9 @@ When an agent enters a real scoped implementation lane, the runtime should be ab
 - task notes with verification context
 
 ### Suggested shape
+
 Introduce a thin standard command surface around the ledger publisher:
+
 - `task.start(...)`
 - `task.block(...)`
 - `task.note(...)`
@@ -62,9 +70,11 @@ Introduce a thin standard command surface around the ledger publisher:
 These should route through the canonical ledger write path, not bypass it.
 
 ### Why this matters
+
 This removes the biggest source of Mission Control drift: real work starts, but the canonical task state never changes.
 
 ### Mercury portability
+
 Portable almost as-is. Mercury should also have a small task command API around its canonical publisher.
 
 ---
@@ -72,10 +82,13 @@ Portable almost as-is. Mercury should also have a small task command API around 
 ## P0.2 Explicit current-task contract in agent heartbeats
 
 ### Goal
+
 Make agent activity reliably attributable to current work.
 
 ### Required heartbeat fields
+
 Every meaningful agent heartbeat should carry:
+
 - `agentId`
 - `status`
 - `currentTaskId`
@@ -87,9 +100,11 @@ Every meaningful agent heartbeat should carry:
 - `phase` / run metadata where relevant
 
 ### Why this matters
+
 Mission Control should not have to guess which task an agent is carrying from a mix of old assignments and latest activity.
 
 ### Mercury portability
+
 Portable conceptually. Names can differ, but the same contract should exist.
 
 ---
@@ -97,9 +112,11 @@ Portable conceptually. Names can differ, but the same contract should exist.
 ## P0.3 Controlled task-reality reconciliation
 
 ### Goal
+
 Catch and repair obvious truth drift between session reality and ledger reality.
 
 ### Example drift cases
+
 - agent has an active run, but assigned task is still `todo`
 - task is `in_progress`, but assigned agent has been idle for hours
 - agent has old blocked tasks plus one newer active task
@@ -107,17 +124,21 @@ Catch and repair obvious truth drift between session reality and ledger reality.
 - agent heartbeat `currentTaskId` disagrees with latest task assignment reality
 
 ### Required behavior
+
 Create a reconciliation layer that can:
+
 - detect drift
 - emit warnings
 - suggest safe fixes
 - optionally apply deterministic safe reconciliations
 
 ### Important rule
+
 Do not hide this inside silent UI reads.
 Reconciliation should be an explicit operational behavior with explainable output.
 
 ### Mercury portability
+
 Portable and desirable. This is one of the strongest candidates to carry into Mercury early.
 
 ---
@@ -125,9 +146,11 @@ Portable and desirable. This is one of the strongest candidates to carry into Me
 ## P0.4 Mission Control freshness + confidence cues
 
 ### Goal
+
 Make the operator surface honest about projection quality.
 
 ### UI should show
+
 - snapshot age
 - last ledger event age
 - per-panel freshness
@@ -138,9 +161,11 @@ Make the operator surface honest about projection quality.
 - whether projection looks stale or reconciled
 
 ### Why this matters
+
 If the dashboard may lag, the UI should say so clearly instead of implying unwarranted certainty.
 
 ### Mercury portability
+
 Portable. Any operator dashboard benefits from explicit projection-confidence cues.
 
 ---
@@ -150,9 +175,11 @@ Portable. Any operator dashboard benefits from explicit projection-confidence cu
 ## P1.1 First-class task relations
 
 ### Goal
+
 Let the ledger express structure instead of treating tasks as isolated cards.
 
 ### Fields to add or normalize
+
 - `parentTaskId`
 - `dependsOn`
 - `blockedBy`
@@ -161,10 +188,12 @@ Let the ledger express structure instead of treating tasks as isolated cards.
 - `workstream`
 
 ### Why this matters
+
 This makes rollups, blockers, and stale superseded work far easier to reason about.
 It also reduces the chance that old blocked tasks visually dominate newer active work.
 
 ### Mercury portability
+
 Strongly portable.
 
 ---
@@ -172,9 +201,11 @@ Strongly portable.
 ## P1.2 Better lifecycle metadata for task participation
 
 ### Goal
+
 Improve rollups and automation by distinguishing active from non-participating children.
 
 ### Important lifecycle modes
+
 - `parked`
 - `superseded`
 - `cancelled`
@@ -182,9 +213,11 @@ Improve rollups and automation by distinguishing active from non-participating c
 - `blocked`
 
 ### Why this matters
+
 Parent rollups and current-task logic become much safer when non-participating work is clearly marked.
 
 ### Mercury portability
+
 Portable and important.
 
 ---
@@ -192,9 +225,11 @@ Portable and important.
 ## P1.3 Operator-side reconcile actions in Mission Control
 
 ### Goal
+
 Let the operator fix obvious state mismatches from the dashboard without inventing dashboard-owned truth.
 
 ### Good candidate actions
+
 - mark started
 - mark blocked/unblocked
 - add note
@@ -204,9 +239,11 @@ Let the operator fix obvious state mismatches from the dashboard without inventi
 - open active lane/session/worktree
 
 ### Rule
+
 Mission Control remains a control surface over the ledger, not an independent truth store.
 
 ### Mercury portability
+
 Portable, but should come after publisher discipline and reconciliation rules exist.
 
 ---
@@ -216,9 +253,11 @@ Portable, but should come after publisher discipline and reconciliation rules ex
 ## P2.1 Nightly operational hygiene
 
 ### Goal
+
 Use a scheduled maintenance pass to improve both memory quality and operational truth hygiene.
 
 ### Candidate checks
+
 - stale `in_progress` tasks
 - orphaned blocked tasks
 - inactive agent/task mismatches
@@ -227,9 +266,11 @@ Use a scheduled maintenance pass to improve both memory quality and operational 
 - memory dedupe / summary regeneration / provenance-preserving compaction
 
 ### Why this matters
+
 Nightly maintenance should operate over the real episode/fact/task substrate instead of placeholder schemas.
 
 ### Mercury portability
+
 Portable in principle; exact maintenance jobs may differ.
 
 ---
@@ -237,9 +278,11 @@ Portable in principle; exact maintenance jobs may differ.
 ## P2.2 Smarter rollup and stuck-lane handling
 
 ### Goal
+
 Reduce human cleanup for long-running projects.
 
 ### Candidate automation
+
 - parent task rollup suggestions
 - stuck-lane detection
 - no-heartbeat-with-open-task warnings
@@ -247,6 +290,7 @@ Reduce human cleanup for long-running projects.
 - QA aging detection
 
 ### Mercury portability
+
 Portable, but only after base lifecycle correctness is in place.
 
 ---
@@ -254,6 +298,7 @@ Portable, but only after base lifecycle correctness is in place.
 # Recommended implementation order
 
 ## OpenClaw / Mission Control
+
 1. **Automatic lifecycle publishing**
 2. **Heartbeat current-task contract hardening**
 3. **Drift detection + reconciliation warnings**
@@ -263,6 +308,7 @@ Portable, but only after base lifecycle correctness is in place.
 7. **Nightly operational hygiene expansion**
 
 ## Mercury carryover order
+
 1. canonical event log + snapshot
 2. task command publisher API
 3. explicit agent heartbeat contract
@@ -277,23 +323,27 @@ Portable, but only after base lifecycle correctness is in place.
 # Suggested acceptance criteria by layer
 
 ## Ledger / publisher layer
+
 - agents can publish start/block/qa/done through a stable API
 - duplicate publishes remain idempotent
 - canonical snapshot updates deterministically
 - provenance is preserved for every meaningful transition
 
 ## Agent activity layer
+
 - heartbeats include `currentTaskId`, lane, session, worktree, branch
 - latest active work is distinguishable from older blocked assignments
 - agent status no longer depends on ambiguous fallback inference alone
 
 ## Mission Control layer
+
 - board reflects canonical task state without manual reconciliation drift
 - agent lanes show current task truth and freshness/confidence
 - activity feed remains historical, not mistaken for current truth
 - reconcile warnings surface when source/projection drift is detected
 
 ## Operator workflow layer
+
 - operator can correct safe state mismatches without editing raw data
 - all control actions publish back through the ledger
 - UI never becomes the canonical source of truth
@@ -320,6 +370,7 @@ If Mercury adopts those principles early, it avoids a huge class of “board say
 # Bottom line
 
 To make the task-ledger/task-bus/Mission Control stack better and more automated:
+
 - automate more lifecycle truth at the source
 - enrich heartbeats with explicit current-work context
 - add controlled reconciliation instead of silent guessing

@@ -334,6 +334,7 @@ following shape at the bridge boundary:
 ```
 
 Rules:
+
 - preserve provenance back to the ledger event id
 - keep the episode concise and semantic
 - do not dump full task objects or raw debug metadata into Ethos
@@ -355,6 +356,7 @@ Durable facts should carry explicit freshness/authority semantics:
 ```
 
 Retrieval policy should prefer:
+
 1. `active`
 2. `disputed` (visible but clearly marked)
 3. `superseded`
@@ -385,12 +387,14 @@ structured recall trace record that the UI can display safely:
 ```
 
 Rules:
+
 - operator-visible, not model-visible
 - enough detail for debugging
 - no raw prompt dump theater
 - no raw Ethos metadata leakage into Mission Control cards
 
 Finalized runtime contract in OpenClaw:
+
 - emit these records through the existing task-ledger/event substrate
 - use `entity: "recall"` + `kind: "trace"` rather than inventing a separate sink
 - keep Mission Control consumption on ledger snapshot/event reads, not prompt scraping
@@ -468,6 +472,7 @@ turning the UI into a prompt dump or leaking raw Ethos metadata.
 ### Likely files to touch
 
 #### OpenClaw source
+
 - `src/hooks/bundled/ethos-context/handler.ts`
   - emit structured recall trace records/events
 - `src/hooks/bundled/ethos-context/handler.test.ts`
@@ -480,6 +485,7 @@ turning the UI into a prompt dump or leaking raw Ethos metadata.
     of a dedicated trace channel
 
 #### Mission Control
+
 - gateway task-ledger sync surfaces
   - `src/gateway/server-methods/tasks.ts`
   - extend `tasks.snapshot` / `tasks.events` consumers if Mission Control needs

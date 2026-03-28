@@ -1,11 +1,11 @@
 import type { OpenClawConfig } from "../../../config/config.js";
 import { publishTaskLedgerEvents } from "../../../infra/task-ledger.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
-import { deriveSessionChatType } from "../../../sessions/session-key-utils.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveCanonicalResourceId,
 } from "../../../routing/session-key.js";
+import { deriveSessionChatType } from "../../../sessions/session-key-utils.js";
 import { resolveHookConfig } from "../../config.js";
 import { isAgentBeforePromptBuildEvent, type HookHandler } from "../../hooks.js";
 
@@ -405,9 +405,9 @@ function buildContextBlockResult(params: {
     };
   }
   try {
-    const payload = JSON.parse(
-      prependContext.slice(jsonStart + 1, jsonEnd),
-    ) as { memories?: Array<{ text?: string }> };
+    const payload = JSON.parse(prependContext.slice(jsonStart + 1, jsonEnd)) as {
+      memories?: Array<{ text?: string }>;
+    };
     const memories = Array.isArray(payload.memories) ? payload.memories : [];
     return {
       prependContext,
@@ -798,8 +798,7 @@ const ethosContextHook: HookHandler = async (event) => {
       candidatesConsidered: 0,
       injectedCount: 0,
       injectedChars: 0,
-      dependencyStatus:
-        error instanceof Error && error.name === "AbortError" ? "timeout" : "error",
+      dependencyStatus: error instanceof Error && error.name === "AbortError" ? "timeout" : "error",
     });
   }
 };
