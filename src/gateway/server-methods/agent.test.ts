@@ -344,18 +344,28 @@ describe("gateway agent handler", () => {
 
   it.each([
     {
-      name: "passes senderIsOwner=false for write-scoped gateway callers",
+      name: "passes senderIsOwner=false and allowModelOverride=false for write-scoped gateway callers",
       scopes: ["operator.write"],
       idempotencyKey: "test-sender-owner-write",
       senderIsOwner: false,
+      allowModelOverride: false,
     },
     {
-      name: "passes senderIsOwner=true for admin-scoped gateway callers",
+      name: "passes senderIsOwner=true and allowModelOverride=true for admin-scoped gateway callers",
       scopes: ["operator.admin"],
       idempotencyKey: "test-sender-owner-admin",
       senderIsOwner: true,
+      allowModelOverride: true,
     },
-  ])("$name", async ({ scopes, idempotencyKey, senderIsOwner }) => {
+    {
+      name: "passes allowModelOverride=true for trusted internal gateway callers",
+      scopes: ["operator.write"],
+      idempotencyKey: "test-allow-model-override-internal",
+      senderIsOwner: false,
+      allowModelOverride: true,
+      internal: { allowModelOverride: true },
+    },
+  ])("$name", async ({ scopes, idempotencyKey, senderIsOwner, allowModelOverride, internal }) => {
     primeMainAgentRun();
 
     await invokeAgent(
@@ -371,15 +381,17 @@ describe("gateway agent handler", () => {
             scopes,
             client: { id: "test-client", mode: "gateway" },
           },
+          internal,
         } as unknown as AgentHandlerArgs["client"],
       },
     );
 
     await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
     const callArgs = mocks.agentCommand.mock.calls.at(-1)?.[0] as
-      | { senderIsOwner?: boolean }
+      | { senderIsOwner?: boolean; allowModelOverride?: boolean }
       | undefined;
     expect(callArgs?.senderIsOwner).toBe(senderIsOwner);
+    expect(callArgs?.allowModelOverride).toBe(allowModelOverride);
   });
 
   it("respects explicit bestEffortDeliver=false for main session runs", async () => {

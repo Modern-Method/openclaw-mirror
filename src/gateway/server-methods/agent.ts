@@ -72,6 +72,12 @@ function resolveSenderIsOwnerFromClient(client: GatewayRequestHandlerOptions["cl
   return scopes.includes(ADMIN_SCOPE);
 }
 
+function resolveAllowModelOverrideFromClient(
+  client: GatewayRequestHandlerOptions["client"],
+): boolean {
+  return resolveSenderIsOwnerFromClient(client) || client?.internal?.allowModelOverride === true;
+}
+
 async function runSessionResetFromAgent(params: {
   key: string;
   reason: "new" | "reset";
@@ -194,6 +200,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       currentTaskId?: string;
     };
     const senderIsOwner = resolveSenderIsOwnerFromClient(client);
+    const allowModelOverride = resolveAllowModelOverrideFromClient(client);
     const cfg = loadConfig();
     const idem = request.idempotencyKey;
     const normalizedSpawned = normalizeSpawnedRunMetadata({
@@ -627,6 +634,7 @@ export const agentHandlers: GatewayRequestHandlers = {
           workspaceDir: sessionEntry?.spawnedWorkspaceDir,
         }),
         senderIsOwner,
+        allowModelOverride,
       },
       runId,
       idempotencyKey: idem,
