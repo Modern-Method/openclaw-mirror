@@ -107,6 +107,25 @@ describe("agentCliCommand", () => {
     });
   });
 
+  it("passes explicit trust bits through the CLI gateway payload", async () => {
+    await withTempStore(async () => {
+      mockGatewaySuccessReply("ok");
+
+      await agentCliCommand({ message: "hello", agent: "main", sessionId: "session-123" }, runtime);
+
+      expect(callGateway).toHaveBeenCalledTimes(1);
+      expect(callGateway).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: "agent",
+          params: expect.objectContaining({
+            senderIsOwner: true,
+            allowModelOverride: true,
+          }),
+        }),
+      );
+    });
+  });
+
   it("falls back to embedded agent when gateway fails", async () => {
     await withTempStore(async () => {
       vi.mocked(callGateway).mockRejectedValue(new Error("gateway not connected"));

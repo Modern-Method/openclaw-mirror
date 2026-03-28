@@ -528,7 +528,9 @@ describe("agentCommand", () => {
       );
       const ingressCall = vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0];
       expect(ingressCall?.senderIsOwner).toBe(false);
-      expect(ingressCall).not.toHaveProperty("allowModelOverride");
+      // The ingress boundary must declare the bit explicitly, but downstream
+      // embedded execution currently normalizes falsy allowModelOverride away.
+      expect(ingressCall?.allowModelOverride).toBeUndefined();
     });
   });
 
@@ -677,9 +679,7 @@ describe("agentCommand", () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
       mockConfig(home, store);
-      let activeRunContext:
-        | ReturnType<typeof getAgentRunContext>
-        | undefined;
+      let activeRunContext: ReturnType<typeof getAgentRunContext> | undefined;
 
       const lifecycleEvents: Array<{
         phase?: string;
@@ -714,7 +714,7 @@ describe("agentCommand", () => {
       );
       stop();
 
-      const endEvent = [...lifecycleEvents].reverse().find((evt) => evt.phase === "end");
+      const endEvent = [...lifecycleEvents].toReversed().find((evt) => evt.phase === "end");
 
       expect(activeRunContext).toMatchObject({
         sessionKey: "agent:main:task-context",

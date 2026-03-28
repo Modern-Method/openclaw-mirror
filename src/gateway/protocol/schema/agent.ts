@@ -94,6 +94,8 @@ export const AgentParamsSchema = Type.Object(
     bestEffortDeliver: Type.Optional(Type.Boolean()),
     lane: Type.Optional(Type.String()),
     currentTaskId: Type.Optional(Type.String()),
+    senderIsOwner: Type.Optional(Type.Boolean()),
+    allowModelOverride: Type.Optional(Type.Boolean()),
     extraSystemPrompt: Type.Optional(Type.String()),
     internalEvents: Type.Optional(Type.Array(AgentInternalEventSchema)),
     inputProvenance: Type.Optional(InputProvenanceSchema),

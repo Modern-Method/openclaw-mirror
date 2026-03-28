@@ -145,6 +145,8 @@ export async function agentViaGatewayCommand(opts: AgentCliOpts, runtime: Runtim
           bestEffortDeliver: opts.bestEffortDeliver,
           timeout: timeoutSeconds,
           lane: opts.lane,
+          senderIsOwner: true,
+          allowModelOverride: true,
           extraSystemPrompt: opts.extraSystemPrompt,
           idempotencyKey,
         },
