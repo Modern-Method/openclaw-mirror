@@ -1,0 +1,208 @@
+import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
+import {
+  getAgentRunContext,
+  type AgentEventPayload,
+  type AgentRunContext,
+} from "../infra/agent-events.js";
+import {
+  publishTaskLifecycleEvent,
+  type TaskLifecyclePublishInput,
+} from "../infra/task-lifecycle-publisher.js";
+
+const TASK_LEDGER_TOPIC = "tasks.ledger";
+const TASK_MILESTONE_ACTOR = {
+  type: "system" as const,
+  id: "task-milestone-updater",
+  name: "Task milestone updater",
+};
+
+function trimToUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeLifecyclePhase(value: unknown): string | undefined {
+  return trimToUndefined(value)?.toLowerCase();
+}
+
+function formatModelRef(provider: unknown, model: unknown): string | undefined {
+  const normalizedModel = trimToUndefined(model);
+  if (!normalizedModel) {
+    return undefined;
+  }
+  const normalizedProvider = trimToUndefined(provider);
+  if (!normalizedProvider) {
+    return normalizedModel;
+  }
+  if (normalizedModel.startsWith(`${normalizedProvider}/`)) {
+    return normalizedModel;
+  }
+  return `${normalizedProvider}/${normalizedModel}`;
+}
+
+function buildStartSummary(runContext: AgentRunContext): string {
+  const details: string[] = [];
+  const lane = trimToUndefined(runContext.lane);
+  const branch = trimToUndefined(runContext.branch);
+
+  if (lane) {
+    details.push(`lane ${lane}`);
+  }
+  if (branch) {
+    details.push(`branch ${branch}`);
+  }
+
+  if (details.length === 0) {
+    return "Milestone update: active implementation work started.";
+  }
+  return `Milestone update: active implementation work started in ${details.join(" on ")}.`;
+}
+
+function buildRepeatedFailureSummary(error: unknown): string {
+  const safeError = trimToUndefined(error);
+  if (!safeError) {
+    return "Milestone update: the active run hit repeated failures and needs attention.";
+  }
+  return `Milestone update: the active run hit repeated failures and needs attention. Latest error: ${safeError}`;
+}
+
+function resolveLifecycleMilestone(params: {
+  evt: AgentEventPayload;
+  runContext: AgentRunContext;
+  taskId: string;
+}): {
+  kind: string;
+  summary: string;
+  idempotencyKey: string;
+} | null {
+  const { evt, runContext, taskId } = params;
+  const phase = normalizeLifecyclePhase(evt.data?.phase);
+  const terminalState = trimToUndefined(evt.data?.terminalState);
+  const sessionKey = trimToUndefined(evt.sessionKey ?? runContext.sessionKey);
+  const agentId = sessionKey ? resolveAgentIdFromSessionKey(sessionKey) : undefined;
+
+  switch (phase) {
+    case "start":
+      return {
+        kind: "run_started",
+        summary: buildStartSummary(runContext),
+        idempotencyKey: `task-milestone:run-started:${taskId}:${evt.runId}:${sessionKey ?? agentId ?? "unknown"}`,
+      };
+    case "fallback": {
+      const model = formatModelRef(evt.data?.activeProvider, evt.data?.activeModel);
+      const reason = trimToUndefined(evt.data?.reasonSummary);
+      const summary =
+        model && reason
+          ? `Milestone update: the active run switched to fallback model ${model} (${reason}).`
+          : model
+            ? `Milestone update: the active run switched to fallback model ${model}.`
+            : reason
+              ? `Milestone update: the active run switched to a fallback model (${reason}).`
+              : "Milestone update: the active run switched to a fallback model.";
+      return {
+        kind: "fallback",
+        summary,
+        idempotencyKey: `task-milestone:fallback:${taskId}:${evt.runId}:${model ?? "unknown"}:${reason ?? "none"}`,
+      };
+    }
+    case "end":
+    case "error":
+      switch (terminalState) {
+        case "blocked_by_input":
+          return {
+            kind: "waiting_for_input",
+            summary:
+              "Milestone update: the active run is waiting for user input before it can continue.",
+            idempotencyKey: `task-milestone:waiting-for-input:${taskId}:${evt.runId}`,
+          };
+        case "unsafe_to_proceed":
+          return {
+            kind: "unsafe_to_proceed",
+            summary:
+              "Milestone update: the active run stopped because the next step is unsafe without operator approval.",
+            idempotencyKey: `task-milestone:unsafe-to-proceed:${taskId}:${evt.runId}`,
+          };
+        case "repeated_failure":
+          return {
+            kind: "repeated_failure",
+            summary: buildRepeatedFailureSummary(evt.data?.error),
+            idempotencyKey: `task-milestone:repeated-failure:${taskId}:${evt.runId}`,
+          };
+        default:
+          return null;
+      }
+    default:
+      return null;
+  }
+}
+
+export function buildTaskLifecycleMilestoneUpdate(
+  evt: AgentEventPayload,
+  options?: {
+    resolveRunContext?: (runId: string) => AgentRunContext | undefined;
+  },
+): TaskLifecyclePublishInput | null {
+  if (evt.stream !== "lifecycle") {
+    return null;
+  }
+
+  const runContext =
+    evt.runContext ?? options?.resolveRunContext?.(evt.runId) ?? getAgentRunContext(evt.runId);
+  if (!runContext || runContext.isHeartbeat) {
+    return null;
+  }
+
+  const taskId = trimToUndefined(runContext.currentTaskId);
+  if (!taskId) {
+    return null;
+  }
+
+  const milestone = resolveLifecycleMilestone({ evt, runContext, taskId });
+  if (!milestone) {
+    return null;
+  }
+
+  const tsValue = new Date(evt.ts);
+  if (Number.isNaN(tsValue.getTime())) {
+    return null;
+  }
+
+  return {
+    action: "note",
+    taskId,
+    summary: milestone.summary,
+    actor: TASK_MILESTONE_ACTOR,
+    ts: tsValue.toISOString(),
+    idempotencyKey: milestone.idempotencyKey,
+  };
+}
+
+export function createTaskLedgerTaskMilestoneListener(params: {
+  broadcast: (topic: string, payload: unknown, options: { dropIfSlow: boolean }) => void;
+  publish?: typeof publishTaskLifecycleEvent;
+  resolveRunContext?: (runId: string) => AgentRunContext | undefined;
+  onError?: (error: unknown) => void;
+}) {
+  const publish = params.publish ?? publishTaskLifecycleEvent;
+  return (evt: AgentEventPayload) => {
+    const update = buildTaskLifecycleMilestoneUpdate(evt, {
+      resolveRunContext: params.resolveRunContext,
+    });
+    if (!update) {
+      return;
+    }
+
+    void publish(update)
+      .then((result) => {
+        for (const event of result.events) {
+          params.broadcast(TASK_LEDGER_TOPIC, event, { dropIfSlow: true });
+        }
+      })
+      .catch((error) => {
+        params.onError?.(error);
+      });
+  };
+}

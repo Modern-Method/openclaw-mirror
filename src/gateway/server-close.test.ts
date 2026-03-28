@@ -29,6 +29,8 @@ describe("createGatewayCloseHandler", () => {
       dedupeCleanup: setInterval(() => undefined, 60_000),
       mediaCleanup: null,
       agentUnsub: null,
+      taskLedgerAgentUnsub: null,
+      taskLedgerTaskMilestoneUnsub: null,
       heartbeatUnsub: null,
       transcriptUnsub: null,
       lifecycleUnsub,
