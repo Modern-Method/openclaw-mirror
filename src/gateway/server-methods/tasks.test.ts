@@ -214,9 +214,9 @@ describe("tasks gateway handlers", () => {
   it("returns INVALID_REQUEST for malformed task ledger events", async () => {
     const publishRespond = vi.fn();
     const context = makeContext();
-    const spy = vi.spyOn(taskLedger, "publishTaskLedgerEvents").mockRejectedValueOnce(
-      new taskLedger.TaskLedgerPublishInputError("bad event"),
-    );
+    const spy = vi
+      .spyOn(taskLedger, "publishTaskLedgerEvents")
+      .mockRejectedValueOnce(new taskLedger.TaskLedgerPublishInputError("bad event"));
 
     await tasksHandlers["tasks.publish"]({
       req: {} as never,
@@ -238,9 +238,9 @@ describe("tasks gateway handlers", () => {
   it("returns UNAVAILABLE for internal publish failures", async () => {
     const publishRespond = vi.fn();
     const context = makeContext();
-    const spy = vi.spyOn(taskLedger, "publishTaskLedgerEvents").mockRejectedValueOnce(
-      new Error("disk full"),
-    );
+    const spy = vi
+      .spyOn(taskLedger, "publishTaskLedgerEvents")
+      .mockRejectedValueOnce(new Error("disk full"));
 
     await tasksHandlers["tasks.publish"]({
       req: {} as never,

@@ -1,11 +1,11 @@
 import type { OpenClawConfig } from "../../../config/config.js";
 import { publishTaskLedgerEvents } from "../../../infra/task-ledger.js";
 import { createSubsystemLogger } from "../../../logging/subsystem.js";
-import { deriveSessionChatType } from "../../../sessions/session-key-utils.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveCanonicalResourceId,
 } from "../../../routing/session-key.js";
+import { deriveSessionChatType } from "../../../sessions/session-key-utils.js";
 import { resolveHookConfig } from "../../config.js";
 import { isAgentBeforePromptBuildEvent, type HookHandler } from "../../hooks.js";
 
@@ -186,6 +186,17 @@ function compactRecord(input: Record<string, unknown>): Record<string, unknown> 
   const output: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
     if (value === undefined) {
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+function compactStringRecord(input: Record<string, string | undefined>): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value !== "string") {
       continue;
     }
     output[key] = value;
@@ -405,9 +416,9 @@ function buildContextBlockResult(params: {
     };
   }
   try {
-    const payload = JSON.parse(
-      prependContext.slice(jsonStart + 1, jsonEnd),
-    ) as { memories?: Array<{ text?: string }> };
+    const payload = JSON.parse(prependContext.slice(jsonStart + 1, jsonEnd)) as {
+      memories?: Array<{ text?: string }>;
+    };
     const memories = Array.isArray(payload.memories) ? payload.memories : [];
     return {
       prependContext,
@@ -430,7 +441,7 @@ function buildContextBlockResult(params: {
 
 function recordMatchesScope(params: {
   record: EthosSearchRecord;
-  resourceId: string;
+  resourceId?: string;
   threadId?: string;
 }): boolean {
   const expectedResourceId = normalizeScopeValue(params.resourceId);
@@ -497,7 +508,7 @@ async function postSearchWithTimeout(params: {
   try {
     const response = await fetch(params.url, {
       method: "POST",
-      headers: compactRecord({
+      headers: compactStringRecord({
         "content-type": "application/json",
         authorization: params.apiKey ? `Bearer ${params.apiKey}` : undefined,
       }),
@@ -798,8 +809,7 @@ const ethosContextHook: HookHandler = async (event) => {
       candidatesConsidered: 0,
       injectedCount: 0,
       injectedChars: 0,
-      dependencyStatus:
-        error instanceof Error && error.name === "AbortError" ? "timeout" : "error",
+      dependencyStatus: error instanceof Error && error.name === "AbortError" ? "timeout" : "error",
     });
   }
 };

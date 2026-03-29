@@ -32,18 +32,19 @@ type AgentEventsRuntimeState = {
 };
 
 const AGENT_EVENTS_STATE_KEY = "__openclaw_agent_events_state__";
-const globalState =
-  (globalThis as unknown as { [AGENT_EVENTS_STATE_KEY]?: AgentEventsRuntimeState })[
-    AGENT_EVENTS_STATE_KEY
-  ] ?? {
-    seqByRun: new Map<string, number>(),
-    listeners: new Set<(evt: AgentEventPayload) => void>(),
-    runContextById: new Map<string, AgentRunContext>(),
-  };
+const globalState = (
+  globalThis as unknown as { [AGENT_EVENTS_STATE_KEY]?: AgentEventsRuntimeState }
+)[AGENT_EVENTS_STATE_KEY] ?? {
+  seqByRun: new Map<string, number>(),
+  listeners: new Set<(evt: AgentEventPayload) => void>(),
+  runContextById: new Map<string, AgentRunContext>(),
+};
 
-if (!(globalThis as unknown as { [AGENT_EVENTS_STATE_KEY]?: AgentEventsRuntimeState })[
-  AGENT_EVENTS_STATE_KEY
-]) {
+if (
+  !(globalThis as unknown as { [AGENT_EVENTS_STATE_KEY]?: AgentEventsRuntimeState })[
+    AGENT_EVENTS_STATE_KEY
+  ]
+) {
   (globalThis as unknown as { [AGENT_EVENTS_STATE_KEY]: AgentEventsRuntimeState })[
     AGENT_EVENTS_STATE_KEY
   ] = globalState;

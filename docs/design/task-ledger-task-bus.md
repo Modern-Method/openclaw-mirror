@@ -14,6 +14,7 @@ implementation details.
 - **Ethos is a searchable memory layer, not the operational truth.**
 
 That separation matters:
+
 - ledger = what happened / what is active
 - Mission Control = what operators see
 - Ethos = what agents can recall semantically later
@@ -21,9 +22,11 @@ That separation matters:
 ## Current implementation shape
 
 Main implementation lives in:
+
 - `src/infra/task-ledger.ts`
 
 Primary schemas:
+
 - `openclaw.task-ledger.event.v1`
 - `openclaw.task-ledger.snapshot.v1`
 
@@ -40,6 +43,7 @@ The ledger materializes into two durable artifacts:
    - includes recent events for cheap consumers
 
 This gives us:
+
 - durable history
 - cheap reads
 - replay/debug path
@@ -52,6 +56,7 @@ This gives us:
 A task carries the coordination state for real work.
 
 Important fields today:
+
 - `id`
 - `title`
 - `description`
@@ -70,6 +75,7 @@ Important fields today:
 - `lastEventAt`
 
 Core states:
+
 - `backlog`
 - `todo`
 - `in_progress`
@@ -83,6 +89,7 @@ Agent activity is tracked separately from tasks so the operator surface can show
 who is alive/working without conflating that with task truth.
 
 Important fields today:
+
 - `id`
 - `name`
 - `status`
@@ -95,6 +102,7 @@ Important fields today:
 - `metadata`
 
 Core statuses:
+
 - `idle`
 - `running`
 - `waiting`
@@ -105,6 +113,7 @@ Core statuses:
 ### Task-side
 
 Current task event kinds:
+
 - `created`
 - `started`
 - `state_changed`
@@ -116,14 +125,17 @@ Current task event kinds:
 ### Agent-side
 
 Current agent event kinds:
+
 - `heartbeat`
 
 ## Publishing model
 
 The main write API is:
+
 - `publishTaskLedgerEvents(...)`
 
 Input forms today are essentially:
+
 - task upsert
 - task transition
 - task note
@@ -132,6 +144,7 @@ Input forms today are essentially:
 ### Important design rule
 
 The publisher is the authoritative place for:
+
 - validation
 - id generation
 - idempotency handling
@@ -144,6 +157,7 @@ This is where task-state hygiene belongs.
 ## Bus semantics
 
 The ledger also acts like a task bus through a stable topic field:
+
 - default topic: `shared.task.ledger`
 
 That topic is not a full pub/sub system by itself; it is the routing/provenance
@@ -153,6 +167,7 @@ operational stream they are consuming.
 ### Practical meaning
 
 The “task bus” in our current design is:
+
 - event publication discipline
 - stable event schema
 - bus topic field
@@ -164,10 +179,12 @@ It is not yet a standalone broker abstraction.
 
 The write path produces a materialized snapshot from the canonical event stream.
 Consumers should prefer:
+
 - **snapshot for operator/UI reads**
 - **events for history/replay/integration**
 
 Mission Control follows this pattern:
+
 - reads task/agent state from the snapshot/projection
 - shows board + activity + detail views
 - never becomes the source of truth itself
@@ -182,6 +199,7 @@ If a parent task should roll forward based on child story/QA progress, that
 happens on the write path, not by mutating state during arbitrary reads.
 
 Why:
+
 - read-path mutation is hard to reason about
 - it creates process-safety issues
 - it can create duplicate synthetic events
@@ -194,6 +212,7 @@ promote it to `qa`/`done` just because children progressed.
 ### Parked / superseded / cancelled children should not participate
 
 Lifecycle metadata matters. Children marked as:
+
 - `parked`
 - `superseded`
 - `cancelled`
@@ -216,6 +235,7 @@ There is no separate Mission Control-native `/api/v1/activities` bridge in the
 current OpenClaw stack, and there is no Phoenix route tree in this repository.
 
 The current contract is:
+
 - runtime/automation activity is written into the canonical ledger by the
   gateway-side task-ledger publishers and lifecycle listeners
 - explicit operator or integration writes go through the gateway RPC method
@@ -228,12 +248,14 @@ That keeps the task ledger as the source of truth and keeps Mission Control as
 the projection/control surface over that truth.
 
 ### It should rely on the ledger for:
+
 - board columns / task state
 - assigned agent and worktree context
 - blockers and notes
 - agent heartbeats / current task
 
 ### It should not invent its own truth for:
+
 - task completion
 - stale task cleanup
 - lane ownership
@@ -248,6 +270,7 @@ The ledger is operational truth.
 Ethos is the searchable memory layer.
 
 So the correct bridge pattern is:
+
 - select high-signal ledger events
 - transform them into concise episodic records
 - preserve provenance back to ledger event ids / task ids
@@ -263,12 +286,14 @@ If we port this into Mercury, the portable ideas are:
 
 Do not make the dashboard/UI the source of truth.
 Keep:
+
 - append-only event history
 - materialized snapshot for cheap reads
 
 ### 2. Stable task schema
 
 Mercury should keep the same conceptual fields:
+
 - stable task id
 - state
 - priority
@@ -285,6 +310,7 @@ actual task state transitions.
 ### 4. Explicit lifecycle metadata
 
 The port should preserve lifecycle semantics for:
+
 - parked
 - superseded
 - blocked
@@ -295,6 +321,7 @@ This is where many “smart board” bugs come from.
 ### 5. Event-driven projections
 
 Mercury can use a different UI, but the pattern should stay:
+
 - ledger events
 - snapshot projection
 - operator-facing surface built on projections
@@ -314,6 +341,7 @@ consumer, not merge memory records into the canonical task log itself.
 ## What is OpenClaw-specific vs portable
 
 ### OpenClaw-specific details
+
 - current schema names
 - current file paths
 - Mission Control implementation details
@@ -321,6 +349,7 @@ consumer, not merge memory records into the canonical task log itself.
 - Ethos hook plumbing
 
 ### Portable concepts
+
 - append-only operational event log
 - materialized snapshot
 - stable task states
@@ -345,12 +374,14 @@ If Mercury adopts this pattern, start with:
 ## Follow-on roadmap
 
 For the automation / reconciliation / Mission Control hardening roadmap that should also carry into Mercury, see:
+
 - `docs/design/task-ledger-mission-control-automation-roadmap.md`
 
 ## Bottom line
 
 The task ledger / task bus is not just “a board backend.”
 It is the operational spine that lets:
+
 - agents coordinate safely
 - dashboards stay honest
 - memory systems ingest meaningful episodes

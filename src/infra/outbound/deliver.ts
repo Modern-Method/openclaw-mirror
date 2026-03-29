@@ -1,8 +1,8 @@
-import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   resolveSendableOutboundReplyParts,
   sendMediaWithLeadingCaption,
 } from "openclaw/plugin-sdk/reply-payload";
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   chunkByParagraph,
   chunkMarkdownTextWithMode,

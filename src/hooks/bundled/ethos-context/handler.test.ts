@@ -257,7 +257,7 @@ describe("ethos-context hook", () => {
       created_at: "1710000000000",
       source: "chat_history",
     });
-    expect(Object.keys(memories[0] ?? {}).sort()).toEqual(["created_at", "source", "text"]);
+    expect(Object.keys(memories[0] ?? {}).toSorted()).toEqual(["created_at", "source", "text"]);
     expect(memories[0]?.id).toBeUndefined();
     expect(memories[0]?.score).toBeUndefined();
     expect(memories[0]?.resource_id).toBeUndefined();
@@ -267,7 +267,7 @@ describe("ethos-context hook", () => {
     expect(memories[0]?.metadata_scores).toBeUndefined();
     expect(JSON.stringify(payload)).not.toContain("should-never-be-exposed");
     expect(JSON.stringify(payload)).not.toContain("agent:main:main");
-    expect(JSON.stringify(payload)).not.toContain("\"score\":");
+    expect(JSON.stringify(payload)).not.toContain('"score":');
 
     expect(publishTaskLedgerEventsMock).toHaveBeenCalledTimes(1);
     const trace = getLastRecallTraceInput();
@@ -385,9 +385,9 @@ describe("ethos-context hook", () => {
     expect(prependContext.length).toBeLessThanOrEqual(220);
     expect(prependContext).toContain(START_DELIMITER);
     expect(prependContext).toContain(END_DELIMITER);
-    expect(prependContext).not.toContain("\"thread_id\":");
-    expect(prependContext).not.toContain("\"resource_id\":");
-    expect(prependContext).not.toContain("\"score\":");
+    expect(prependContext).not.toContain('"thread_id":');
+    expect(prependContext).not.toContain('"resource_id":');
+    expect(prependContext).not.toContain('"score":');
   });
 
   it("does not run when canaryAgents is empty", async () => {
@@ -668,7 +668,9 @@ describe("ethos-context hook", () => {
   });
 
   it("records timeout fail-open when the Ethos request aborts", async () => {
-    fetchMock.mockRejectedValueOnce(Object.assign(new Error("request aborted"), { name: "AbortError" }));
+    fetchMock.mockRejectedValueOnce(
+      Object.assign(new Error("request aborted"), { name: "AbortError" }),
+    );
     const cfg = createConfig({ canaryAgents: ["main"] });
     const event = createScopedEvent(cfg);
     (event.context as { prependContext?: unknown }).prependContext = "stale-recall-block";

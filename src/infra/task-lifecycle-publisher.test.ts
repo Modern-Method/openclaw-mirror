@@ -2,7 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readTaskLedgerEvents, readTaskLedgerSnapshot } from "./task-ledger.js";
+import {
+  readTaskLedgerEvents,
+  readTaskLedgerSnapshot,
+  type TaskLedgerTaskRecord,
+} from "./task-ledger.js";
 import {
   buildTaskLifecyclePublishInput,
   publishTaskLifecycleEvent,
@@ -21,6 +25,10 @@ afterEach(async () => {
     stateDirs.splice(0).map(async (dir) => await fs.rm(dir, { recursive: true, force: true })),
   );
 });
+
+function isTaskNoteEvent(event: { entity: string; kind: string }): event is TaskLedgerTaskRecord {
+  return event.entity === "task" && event.kind === "note";
+}
 
 describe("task lifecycle publisher", () => {
   it("maps lifecycle actions onto canonical task-ledger publish inputs", () => {
@@ -187,15 +195,15 @@ describe("task lifecycle publisher", () => {
     ]);
 
     const reconcileNotes = events.filter(
-      (event) =>
-        event.kind == "note" &&
+      (event): event is TaskLedgerTaskRecord =>
+        isTaskNoteEvent(event) &&
         typeof event.idempotencyKey == "string" &&
         event.idempotencyKey.startsWith("reconcile:in-progress-agent-missing:"),
     );
 
     expect(reconcileNotes).toHaveLength(1);
     expect(reconcileNotes.map((event) => event.summary)).toEqual([
-      "Reconcile residue: task is still marked in progress for assigned agent forge, but no agent heartbeat is recorded. This usually means stale residue from earlier work; verify whether the task should remain in progress or be reassigned.",
+      "Reconcile residue: task is still marked in progress for assigned agent forge, but no agent heartbeat is recorded. This is immediate ownership escalation. If forge is no longer the owner, reassign through the ledger by updating assignedAgent (or clearing it), then require the gaining owner to heartbeat currentTaskId task-1. Mission Control remains a control surface only.",
     ]);
 
     expect(events.map((event) => event.idempotencyKey)).toEqual([
